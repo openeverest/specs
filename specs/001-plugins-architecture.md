@@ -38,15 +38,16 @@ A few examples:
 * An AI copilot - it connects to DB endpoints to fetch the data, but does not really change the core.
 * Showing observability metrics in the UI
 
-
 **Goals:**
 
 * Database and data technologies plugin system
 
+The goal will be for a user to write a minimal amount of code, define UI artifacts through YAML manifest or similar and immediately see the plugin in the UI.
+
 **Non-Goals:**
 
-*   Integrations with databases for data management
-*   
+* Integrations with databases for data management
+
 This will be a separate set of plugins. They don't really touch the core of the product and does not really change the backend side of the house.
 
 ## 4. Proposed Solution / Design
@@ -55,24 +56,19 @@ TBD
 
 ## 5. Definition of Done
 
-What does "completed" look like?
-List the concrete, verifiable criteria that must be met for this spec to be considered fully Implemented. This is your checklist.
-
-* Feature X is deployed to the staging environment.
-* API documentation is updated in /docs.
-* Integration tests with >90% coverage are passing.
-* A user guide has been written.
+* Contributors can add new database engines and technologies within days.
+* The path to add new plugin as well documented and semi-automated
+* Existing database technologies (Percona Operators) are using the new plugin system
+* * Upgrade path is described and well tested
 
 ## 6. Alternatives Considered
 
-What other paths did we explore?
-Discuss other designs, technologies, or approaches that were considered. Explain why the proposed solution was chosen over these alternatives. This demonstrates thorough thinking.
+TBD
 
 ## 7. Open Questions
 
-What do we still need to figure out?
-List any unresolved issues, trade-offs, or decisions that need further discussion or research during the review phase.
+There are lots of questions regarding UI and everything else.
 
 ## 8. References
 
-Links to relevant documentation, research, or prior art.
+TBD
