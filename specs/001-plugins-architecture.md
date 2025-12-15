@@ -97,7 +97,6 @@ spec:
       versions:
         - version: 2.44.1
           image: percona/pmm-server:2.44.1
-
     prometheus:
       versions:
         ...
@@ -185,6 +184,157 @@ spec:
     configServer: {}
     backupAgent: {}
     monitoring: {}
+```
+
+### Provider Go SDK
+
+This section contains the proposal of the provider architecture and the design of a Go SDK aimed at standardising the development of these providers. In [Provider](#2-provider), we have seen the Provider custom resource. This CR is only a logical representation of a provider. A provider is the underlying component that implements the actual lifecycle management of the database system. The SDK provides the supporting libraries, scaffolding and guard rails for building providers that fit into the OpenEverest workflow.
+
+Directly integrating each new database operator manually leads to code sprawl and slow onboarding of new database technologies. By introducing a Provider abstraction, OpenEverest enables clean separation between the core and pluggable database integrations. Building a provider that interfaces with third-party Kubernetes operators can be complex and repetitive. Each provider must handle resource management, lifecycle events, error propagation, and status updates in a Kubernetes-native manner, often reimplementing similar logic for different databases. The Provider Go SDK addresses this challenge by offering a reusable toolkit and opinionated patterns for building new providers. It encapsulates logic for reconciliation, error handling and lifecycle management. This improves the development experience and lowers the barrier to bringing new database technologies into OpenEverest.
+
+#### Technical Details
+
+A provider consists of a controller and a web server. The controller is implemented using controller-runtime library, and is dedicated for reconciling `DatabaseCluster` resources referencing its provider type (via . `spec.provider`). This controller interfaces with OpenEverest and the relevant resources of the underlying database operator. The webserver provides an HTTP endpoint that exposes the schema of the components, topologies and global configurations. It also provides an HTTP endpoint that serves as a validation webhook. Developers may program custom validation logic.
+
+```mermaid
+graph TB
+  A[OpenEverest API Server]
+  B[Kube Client]
+  C[DatabaseCluster CRD]
+
+  subgraph Providers
+    direction LR
+      P[Provider]
+  end
+
+  A -->|create| C
+  B -->|create| C
+  P -->|reconciles| C
+  P -->|creates| TR[Third-party resources]
+
+  D[Third-party operators]
+  D -->|reconciles| TR
+```
+
+##### Controller builder
+
+```go
+// Initialize a new provider builder.
+// We need to set the name of the provider. This will tell
+// the controller to reconcile only those DatabaseClusters whose
+// .spec.provider references the name set here.
+providerBldr := provider.New().WithName("mydb")
+ctrl := providerBldr.Controller()
+
+// We can set the objects owned by the controller.
+// The controller will then trigger reconciliation on
+// those DatabaseClusters which own the changed objects.
+ctrl.Owns(&v1.MyDB{})
+ctrl.Owns(&corev1.Secret{})
+
+// We can also set a custom watcher using a Map function.
+ctrl.WithWatch(corev1.Pod, customPodHandler)
+ctrl.WithWatch(&corev1.Pod{}, func(ctx context.Context, obj client.Object) []reconcile.Request {
+	return nil
+}, controller.WithWatchOptions{})
+
+// We can set one or more reconciliation steps.
+// The controller calls these steps in the order in which they are set.
+ctrl.WithSyncStep(Prepare, func(ctx context.Context, c client.Client, dbc *v2alpha1.DatabaseCluster) error {
+	// Custom setup logic
+	return nil
+})
+ctrl.WithSyncStep(Ensure, func(ctx context.Context, c client.Client, dbc *v2alpha1.DatabaseCluster) error {
+	// Create or update MyDB CRs
+	return nil
+})
+
+// We can configure a status getter. This function computes
+// the status of the DatabaseCluster.
+ctrl.WithStatusGetter(func(ctx context.Context, c client.Client, dbc *v2alpha1.DatabaseCluster) (v2alpha1.DatabaseClusterStatus, error) {
+	// Populate status
+	return status, nil
+})
+
+// Finally, we may set a cleanup step that is called when the
+// DatabaseCluster is deleted.
+ctrl.WithCleanupStep(func(ctx context.Context, c client.Client, dbc *v2alpha1.DatabaseCluster) (bool, error) {
+	// Delete MyDB CRs/resources
+	return true, nil
+})
+```
+
+##### Server builder
+
+```go
+srv := providerBldr.Server()
+
+// Register object types for components and topologies
+// The registered Go types are converted to OpenAPI v3 format
+// and exposed over an HTTP endpoint.
+srv.RegisterComponentSchema("mongod", &Mongod{})
+srv.RegisterComponentSchema("mongos", &Mongos{})
+srv.RegisterComponentSchema("pmm", &PMM{})
+
+srv.RegisterTopologySchema("sharded", &ShardedCfg{})
+srv.RegisterGlobalConfigSchema(&GlobalConfig{})
+
+// Register validation functions.
+srv.RegisterValidator("description", func(ctx context.Context, c client.Client, d
+c *v2alpha1.DatabaseCluster) error {
+	// Validate custom invariants
+	return nil
+})
+
+srv.WithValidationWebhookURL("/validate")
+```
+
+The HTTP endpoint that returns the schema shall have the following structure:
+
+```
+{
+  "global": {
+    // ... openapi schema
+  },
+  "components": {
+    "mongod": {
+      // ... openapi schema
+    },
+    "mongos": {
+      // ... openapi schema
+    },
+    "pmm": {
+      // ... openapi schema
+    }
+  },
+  "topologies": {
+    "sharded": {
+      // ... openapi schema
+    }
+  }
+}
+```
+
+The sequence diagram below illustrates the flow for validating a DatabaseCluster
+when it is created/updated:
+
+![img_2.png](img_2.png)
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant KubeAPI as Kube API Server
+    participant OpenEverest as OpenEverest Operator
+    participant Provider
+
+    User->>KubeAPI: 1. Create DatabaseCluster
+    KubeAPI->>KubeAPI: 2. Validate with CRD
+    KubeAPI->>OpenEverest: 3. Validation Webhook Call
+    OpenEverest->>Provider: 4. GET /v1/openapischema
+    Provider->>OpenEverest: 5. Return OpenAPI schemas
+    OpenEverest->>KubeAPI: 6. Validation response
+    KubeAPI->>Provider: 7. Validation Webhook call (provider validation)
+    Provider->>KubeAPI: 8. Validation response
 ```
 
 ## 5. Definition of Done
