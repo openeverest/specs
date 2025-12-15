@@ -352,7 +352,7 @@ The UI Generator is a dynamic form and UI builder based on OpenAPI-like schema d
 - Standard Zod rules are applied per field
 - CEL expressions allow for advanced, cross-field validation logic. CEL allows you to write rules like `fieldA > fieldB`. Dependencies are tracked so that changes in one field can trigger revalidation of others.
 
-#### UI form generator yaml schema examples
+#### UI Form Generator YAML Schema Examples
 
 `uiType` - the main indicator of what component should be displayed. Should be located at the first nesting level of the component.
 
@@ -367,7 +367,7 @@ allowUnsafeFlags: {
 
 `validation` - allows to set standard Zod Rules such as (min, max, email, url, regex, startsWith, includes, etc.) and CEL (Common Expression Language) expressions for cross-field logic. Should be placed on the same level as a uiType.
 
-example of validation with Zod Rules
+Example of validation with Zod Rules
 
 ```
 replicas: {
@@ -378,7 +378,7 @@ replicas: {
   uiType: 'Number',
 },
 ```
-example of CEL (Common Expression Language) expression
+Example of CEL (Common Expression Language) expression
 
 ```
 requests2: {
@@ -409,12 +409,14 @@ replicas: {
 },
 ```
 
-`subParameters` - a group of fields with their own params. (Should it be described as an array?).
+`subParameters` - an object mapping field names to their own params.
 
 ```
 limits: {
   uiType: 'Group',
-  label: 'Limits',
+  params: {
+    label: 'Limits',
+  },
   subParameters: {
     cpu: {
       uiType: 'Number',
