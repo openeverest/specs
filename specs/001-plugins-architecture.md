@@ -337,6 +337,105 @@ sequenceDiagram
     Provider->>KubeAPI: 8. Validation response
 ```
 
+### UI Form Generator
+
+The UI Generator is a dynamic form and UI builder based on OpenAPI-like schema definitions. It is designed to render complex forms and validation logic for the Everest platform, using React and Zod for schema validation.
+
+#### Key Features
+
+- Dynamic Form Rendering: Generates forms based on schema definitions
+- Validation: Supports both standard Zod validations and advanced CEL (Common Expression Language) expressions for cross-field logic
+- Reactive Dependencies: Automatically revalidates fields when dependencies change
+
+#### Validation
+
+- Standard Zod rules are applied per field
+- CEL expressions allow for advanced, cross-field validation logic. CEL allows you to write rules like `fieldA > fieldB`. Dependencies are tracked so that changes in one field can trigger revalidation of others.
+
+#### UI form generator yaml schema examples
+
+`uiType` - the main indicator of what component should be displayed. Should be located at the first nesting level of the component.
+
+`description` - the ability to add your own text next to a field or group of fields.
+
+```
+allowUnsafeFlags: {
+  uiType: 'Toggle',
+  description: 'CPU Limits',
+}
+```
+
+`validation` - allows to set standard Zod Rules such as (min, max, email, url, regex, startsWith, includes, etc.) and CEL (Common Expression Language) expressions for cross-field logic. Should be placed on the same level as a uiType.
+
+example of validation with Zod Rules
+
+```
+replicas: {
+  validation: {
+    min: 1,
+    max: 99,
+  },
+  uiType: 'Number',
+},
+```
+example of CEL (Common Expression Language) expression
+
+```
+requests2: {
+  uiType: 'Number',
+  validation: {
+    celExpr:
+      'components.mongod.resources.limits.cpu >= 10 && components.mongod.resources.requests2 < 4',
+  },
+}
+```
+
+<br>
+
+`params` - an object to configure the properties of a field in more detail: "placeholder, default-value, label, etc." In the basic version, this is a limited set of properties, but in the future it may be an inheritance of the properties of the original material-ui component (while it makes sense and does not overload schema).
+
+```
+replicas: {
+  validation: {
+    min: 1,
+    max: 99,
+  },
+  uiType: 'Number',
+  params: {
+    label: 'Replicas',
+    placeholder: '',
+    default: '9999',
+  },
+},
+```
+
+`subParameters` - a group of fields with their own params. (Should it be described as an array?).
+
+```
+limits: {
+  uiType: 'Group',
+  label: 'Limits',
+  subParameters: {
+    cpu: {
+      uiType: 'Number',
+      description: 'CPU Limits',
+      params: {
+        badge: 'Cores',
+        label: 'CPU',
+      },
+    },
+    memory: {
+      uiType: 'Number',
+      description: 'Memory Limits',
+      params: {
+        badge: 'Gi',
+        label: 'Memory',
+      },
+    },
+  }
+}
+```
+
 ## 5. Definition of Done
 
 * Contributors can add new database engines and technologies within days.
