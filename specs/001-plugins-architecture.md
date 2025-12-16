@@ -318,8 +318,6 @@ The HTTP endpoint that returns the schema shall have the following structure:
 The sequence diagram below illustrates the flow for validating a DatabaseCluster
 when it is created/updated:
 
-![img_2.png](img_2.png)
-
 ```mermaid
 sequenceDiagram
     participant User
