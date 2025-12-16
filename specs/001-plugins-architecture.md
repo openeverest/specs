@@ -361,7 +361,7 @@ The UI Generator is a dynamic form and UI builder based on OpenAPI-like schema d
 ```
 allowUnsafeFlags: {
   uiType: 'Toggle',
-  description: 'CPU Limits',
+  description: 'Allow unsafe configurations',
 }
 ```
 
