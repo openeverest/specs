@@ -58,48 +58,50 @@ This design is driven by the need for extensibility and universality. While plug
 
 Since configuration requirements differ across database vendors and topologies, plugin developers must be given a mechanism to dynamically extend the schema. This ensures the DatabaseCluster CRD can express operator-specific configurations while still remaining consistent.
 
-**DatabaseClusterDefinition**:
-Cluster-scoped CRD. Describes available components, versions, images, and topologies.
-
 **Provider**:
-Cluster-scoped CRD. References a DatabaseClusterDefinition and aggregates information among other things that are not included in this document.
+Cluster-scoped CRD. Describes available components, versions, images, and topologies.
 
 **DatabaseCluster**:
 Namespace-scoped CRD. References Provider and drives configuration of components and topologies at runtime.
 
 #### Technical Details
 
-##### 1. DatabaseClusterDefinition
+##### 1. Provider
 
 Represents the available building blocks (components) and valid topologies for a database system/operator.
 
 ```yaml
 apiVersion: everest.percona.com/v2alpha1
-kind: DatabaseClusterDefinition
+kind: Provider
 metadata:
-  name: psmdb-operator
+  name: percona-server-mongodb-operator
 spec:
   # Defines a list of component types for this provider.
-  # Each component type has a list of versions and images.
+  # Each component type has a list of versions and images. 
   componentTypes:
     mongod:
       versions:
+        - version: 6.0.19-16
+          image: percona/percona-server-mongodb:6.0.19-16-multi
+        - version: 6.0.21-18
+          image: percona/percona-server-mongodb:6.0.21-18
+        - version: 7.0.18-11
+          image: percona/percona-server-mongodb:7.0.18-11
         - version: 8.0.4-1
           image: percona/percona-server-mongodb:8.0.4-1-multi
         - version: 8.0.8-3
           image: percona/percona-server-mongodb:8.0.8-3
           default: true
+    
     backup:
       versions:
         - version: 2.9.1
           image: percona/percona-server-mongodb-backup:2.9.1
+
     pmm:
       versions:
         - version: 2.44.1
           image: percona/pmm-server:2.44.1
-    prometheus:
-      versions:
-        ...
 
   # Defines a list of components for this provider.
   # Each component has a type from componentTypes.
@@ -114,8 +116,8 @@ spec:
     backupAgent:
       type: backup
     monitoring:
-      type: prometheus
-
+      type: pmm
+      
   # Defines a list of topologies for this provider.
   # Each topology defines the components that are supported by that topology.
   topologies:
@@ -138,24 +140,11 @@ spec:
         configServer: {}
         backupAgent:
           optional: true
-        monitoring:
+        monitoring: 
           optional: true
 ```
 
-##### 2. Provider
-
-Maps to a single DatabaseClusterDefinition. A DatabaseCluster must belong to a single Provider in order for OpenEverest to be able to derive the correct structure of the components and topologies.
-
-```yaml
-apiVersion: everest.percona.com/v2alpha1
-kind: Provider
-metadata:
-  name: psmdb-operator
-spec:
-  # ...
-  databaseClusterDefinition: psmdb-operator
-```
-##### 3. DatabaseCluster
+##### 2. DatabaseCluster
 
 Represents an operational database cluster instance, referencing a Provider for structure and validation.
 ```yaml
