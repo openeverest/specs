@@ -1,7 +1,7 @@
 # Modular core for plugin architecture
 
 *   **Status:** Draft
-*   **Authors:** @spron-in
+*   **Authors:** @spron-in @recharte @chilagrow @solovevayaroslavna
 *   **Created:** 2025-12-11
 *   **Last Updated:** 2025-12-11
 *   **Related Issues:** openeverest/roadmap#1
