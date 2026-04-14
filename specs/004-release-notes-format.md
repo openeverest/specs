@@ -1,9 +1,9 @@
 # Release Notes Format Standardization
 
-*   **Status:** Draft
+*   **Status:** Accepted
 *   **Authors:** @spron-in
 *   **Created:** 2026-04-13
-*   **Last Updated:** 2026-04-13
+*   **Last Updated:** 2026-04-14
 *   **Related Issues:**
 
 ---
@@ -24,7 +24,7 @@ A single, shared template eliminates duplication, reduces maintenance overhead, 
 
 *   Define one canonical release notes template used for both GitHub releases and everest-doc.
 *   Replace tabbed highlight UI with plain sequential Markdown sections for better readability in all rendering contexts.
-*   Define `Changes` as the required parent section grouping Added, Changed, Improved & Fixed entries.
+*   Define `Changes` as the required parent section grouping Added, Changed & Improved, and Fixed entries.
 
 **Non-Goals:**
 
@@ -60,10 +60,10 @@ A single, shared template eliminates duplication, reduces maintenance overhead, 
 ### Added
 - ...
 
-### Changed
+### Changed & Improved
 - ...
 
-### Improved & Fixed
+### Fixed
 - ...
 
 ---
@@ -84,7 +84,7 @@ A single, shared template eliminates duplication, reduces maintenance overhead, 
 ### Key rules
 
 1. **No tabs in highlights.** Each highlight is a plain `###` subsection under `## 🌟 Release highlights`. Prose, code blocks, and doc links are written sequentially.
-2. **`Changes` is the required parent section** for all changelog entries. Subsections are `Added`, `Changed`, and `Improved & Fixed`. Every entry links to a GitHub issue or PR.
+2. **`Changes` is the required parent section** for all changelog entries. Subsections are `Added`, `Changed & Improved`, and `Fixed`. `Fixed` contains only bug fixes; all non-breaking improvements go into `Changed & Improved`. Every entry links to a GitHub issue or PR.
 3. **One template, two destinations.** The same Markdown source is published to GitHub releases and committed to `openeverest/everest-doc`. No format divergence is permitted.
 
 ## 5. Definition of Done
