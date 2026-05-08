@@ -2,14 +2,14 @@
 
 This repository is the central hub for designing the future of the **OpenEverest** project. It contains **Specifications (Specs)** that propose, define, and archive significant changes, features, and architectural decisions for OpenEverest.
 
-### 🎯 What This Repository Is For
+### What This Repository Is For
 
 *   **Major Proposals**: Capturing ideas, requirements, and designs for new features or substantial changes.
 *   **Architecture & Design**: Documenting technical architecture, system design decisions, and the reasoning behind them.
 *   **Transparent Roadmapping**: Providing a clear, historical record of *what* we plan to build, *why* we are building it, and *how* it will work.
 *   **Community Collaboration**: Serving as the primary place for structured, asynchronous discussion on the project's direction.
 
-### ❌ What This Repository Is *Not* For
+### What This Repository Is *Not* For
 
 *   **Bug Reports**: Please use the [main OpenEverest issue tracker](https://github.com/openeverest/openeverest/issues) for reporting bugs or problems.
 *   **General Support Questions**: For usage help, please check our documentation or community channels.
@@ -17,7 +17,7 @@ This repository is the central hub for designing the future of the **OpenEverest
 
 ---
 
-## 🚀 How to Use This Repository
+## How to Use This Repository
 
 The spec process bridges the gap between a high-level idea and concrete implementation. Here’s the workflow:
 
@@ -30,7 +30,7 @@ The spec process bridges the gap between a high-level idea and concrete implemen
 
 ---
 
-## 📝 Creating a New Specification
+## Creating a New Specification
 
 To ensure consistency and clarity, all specs follow a standard format.
 
@@ -44,7 +44,7 @@ To ensure consistency and clarity, all specs follow a standard format.
 
 Please copy the template [specs/###-spec-template.md](specs/###-spec-template.md) into your new file. Each section is designed to "work backwards" from the customer need to the technical solution, ensuring clarity on the problem and the definition of done.
 
-## 🤝 Review & Discussion Process
+## Review & Discussion Process
 
 1.  **Draft**: Create your spec and open a **Pull Request (PR)**. Set the status to `Draft`.
 2.  **Review**:
@@ -59,13 +59,13 @@ Please copy the template [specs/###-spec-template.md](specs/###-spec-template.md
 
 ---
 
-## 📄 License
+## License
 
 All specifications in this repository are licensed under the **[Apache License 2.0](LICENSE)**.
 
 ---
 
-## 💬 Getting Help
+## Getting Help
 
 If you have questions about the spec process:
 *   Join our community - see links at [openeverest.io](https://openeverest.io)
