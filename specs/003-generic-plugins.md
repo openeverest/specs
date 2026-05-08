@@ -542,13 +542,13 @@ graph TB
     end
 
     subgraph OpenEverest Core
-        API[API Server\n/v1/plugins/{name}/*]
+        API["API Server\n/v1/plugins/{name}/*"]
         Auth[Auth / Session]
         RBAC[RBAC Engine\nCasbin]
         Proxy[Plugin Proxy]
         EventStream[GET /v1/events\nSSE over kube watch\nstateless]
         TokenSvc[Plugin Token Service\nautonomous identities]
-        PluginAPI[GET /v1/plugins\nGET /v1/plugin-context\nGET /v1/databases/{id}/connection-details]
+        PluginAPI["GET /v1/plugins\nGET /v1/plugin-context\nGET /v1/databases/{id}/connection-details"]
     end
 
     subgraph Kubernetes
