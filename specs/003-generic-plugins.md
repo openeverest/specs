@@ -3,7 +3,7 @@
 *   **Status:** Draft
 *   **Authors:** @spron-in
 *   **Created:** 2026-04-09
-*   **Last Updated:** 2026-05-08
+*   **Last Updated:** 2026-05-14
 *   **Related Issues:**
 *   **Related specs:** [001 — Modular core / Provider plugins](./001-plugins-architecture.md)
 
@@ -40,6 +40,9 @@ Without an extension model for this class of capability, every such feature must
 | **Frontend bundle** | An optional ESM JavaScript module loaded at runtime into the web UI shell. |
 | **Extension point** | A named, typed slot in the host UI or CLI where a plugin registers a contribution. |
 | **PluginInstallation** | A namespace-scoped CR that enables a plugin within a specific namespace and holds per-tenant config. |
+| **Infrastructure plugin** | A generic plugin that creates and manages its own Kubernetes resources (Deployments, Services, ConfigMaps) in response to lifecycle events. Requires `spec.kubePermissions` to declare the additional RBAC it needs beyond the OpenEverest API. |
+| **Stateful plugin** | A generic plugin that declares custom resource schemas in its manifest. The host installs the CRDs, watches instances via a dynamic informer, and routes reconciliation events to the plugin backend over HTTP. The plugin does not run its own operator. |
+| **Plugin CRD** | A `CustomResourceDefinition` declared by a stateful plugin under the `plugins.openeverest.io` API group. Installed, validated, and watched by the host; reconciled by the plugin backend via webhook-style HTTP callbacks. |
 
 ## 4. Goals & Non-Goals
 
@@ -154,6 +157,10 @@ spec:
       - type: clusterDetailTab
         label: "Query"
         component: ClusterQueryTab       # exported name in the bundle
+        # Optional: limit to specific database engine types.
+        # Valid values: "postgresql", "psmdb", "pxc".
+        # Omit to show for all engine types.
+        providers: ["postgresql"]
 
   # Backend contribution (optional).
   backend:
@@ -207,6 +214,20 @@ spec:
     - verb: read
       resource: database-cluster-connection-details
 
+  # Kubernetes RBAC: additional Kubernetes API permissions the plugin's
+  # ServiceAccount needs beyond the OpenEverest API. Used by infrastructure
+  # plugins that create per-cluster resources (e.g., ProxySQL deployments).
+  # The host auto-generates a Role/ClusterRole from these rules and binds
+  # it to the plugin's ServiceAccount. Spec-001 resources are excluded by
+  # the hard denylist regardless of what is declared here.
+  kubePermissions:
+    - apiGroups: ["apps"]
+      resources: ["deployments"]
+      verbs: ["get", "list", "watch", "create", "update", "delete"]
+    - apiGroups: [""]
+      resources: ["services", "configmaps"]
+      verbs: ["get", "list", "watch", "create", "update", "delete"]
+
   # CLI contribution (optional).
   cli:
     image: "ghcr.io/acmecorp/sql-explorer-cli:1.2.0"
@@ -235,18 +256,103 @@ spec:
 
 Each extension point is a named, versioned slot in the React shell. The host exports the full taxonomy from `@everest/plugin-sdk` as TypeScript types so plugin authors get compile-time safety.
 
-| Extension point | Where it appears | Props passed to component |
-|---|---|---|
-| `route` | Top-level React Router route at `/plugins/{name}/{path}` | `{ pluginName, params }` |
-| `sidebarItem` | Main navigation sidebar | `{ navigate, currentPath }` |
-| `clusterDetailTab` | Extra tab on a `DatabaseCluster` detail page | `{ cluster, namespace }` |
-| `clusterAction` | Context-menu action in the clusters table | `{ cluster, namespace, onClose }` |
-| `clusterCard` | Widget card on the cluster overview | `{ cluster, namespace }` |
-| `globalDashboardWidget` | Card on the home / dashboard page | `{ namespaces }` |
-| `settingsPanel` | Tab inside the Settings page | `{ currentUser }` |
-| `themeOverride` | MUI theme override (logos, palette) | `{ defaultTheme }` — Phase 4 |
+| Extension point | Where it appears | Props passed to component | Provider filter |
+|---|---|---|---|
+| `route` | Top-level React Router route at `/plugins/{name}/{path}` | `{ pluginName, params }` | — |
+| `sidebarItem` | Main navigation sidebar | `{ navigate, currentPath }` | — |
+| `clusterDetailTab` | Extra tab on a `DatabaseCluster` detail page | `{ cluster, namespace }` | ✓ |
+| `clusterAction` | Context-menu action in the clusters table | `{ cluster, namespace, onClose }` | ✓ |
+| `clusterCard` | Widget card on the cluster overview | `{ cluster, namespace }` | ✓ |
+| `instanceCreateFormSection` | Collapsible section in the create-instance wizard | `{ formValues, onChange, namespace }` | ✓ |
+| `instanceEditFormSection` | Collapsible section in the edit-instance page | `{ instance, formValues, onChange, namespace }` | ✓ |
+| `globalDashboardWidget` | Card on the home / dashboard page | `{ namespaces }` | — |
+| `settingsPanel` | Tab inside the Settings page | `{ currentUser }` | — |
+| `themeOverride` | MUI theme override (logos, palette) | `{ defaultTheme }` — Phase 4 | — |
 
 Extension points are **additive** — a plugin can register for multiple points. A host version that does not recognise a point silently skips it.
+
+#### Provider filtering
+
+Extension points that render in a database context (`clusterDetailTab`, `clusterAction`, `clusterCard`) support an optional `providers` filter. When declared, the host only renders the contribution for clusters whose `spec.engine.type` matches one of the listed values. Valid values are `"postgresql"`, `"psmdb"` (MongoDB), and `"pxc"` (MySQL).
+
+The filter is expressed in two complementary places:
+
+- **Plugin CR** (`spec.frontend.extensionPoints[].providers`) — documents the intent in the manifest; the value is forwarded by `GET /v1/plugins` to the frontend shell.
+- **Bundle registration** (`registerExtension` call, `providers` field on the extension object) — the runtime gate; the host skips rendering the component if the current cluster's engine type is not in the list.
+
+Omitting `providers` (or leaving it empty) means "show for all engine types". Existing plugins that do not set the field are unaffected.
+
+#### Instance creation / edit form sections
+
+The `instanceCreateFormSection` and `instanceEditFormSection` extension points let a plugin inject a collapsible configuration section into the instance creation wizard and the instance edit page respectively. This enables infrastructure plugins to let users opt in to plugin-managed features (e.g., "Enable ProxySQL") and configure them (exposure mode, resources, custom config) as part of the normal instance lifecycle.
+
+**Data flow:**
+
+1. The plugin registers a React component via `registerExtension({ type: 'instanceCreateFormSection', ... })`. The component receives `formValues` (current form state) and an `onChange(pluginConfig)` callback.
+2. The user fills in the plugin section. The host collects the plugin config as an opaque JSON blob keyed by plugin name.
+3. On form submission the host includes the plugin configs in a `POST` to the plugin backend: `POST /v1/plugins/{name}/instance-config` with `{ instance, namespace, config }`. The plugin backend stores the config (e.g., as a `ConfigMap` or in its own state) and acts on it — creating Deployments, Services, etc.
+4. The host does **not** store the plugin config on the `Instance` CR. The plugin owns its own state. The host is only a messenger between the UI form and the plugin backend.
+
+**Props:**
+
+| Prop | Type | Description |
+|---|---|---|
+| `formValues` | `Record<string, unknown>` | Current form state (read-only snapshot). |
+| `onChange` | `(config: Record<string, unknown>) => void` | Callback to update the plugin's config section. |
+| `namespace` | `string` | Target namespace for the instance. |
+| `instance` | `Instance \| undefined` | The existing instance (edit mode only; `undefined` during create). |
+
+### 8.1 UI/UX consistency requirements
+
+Plugins **must** use the host's existing design system and styling infrastructure.
+The goal is that a user cannot visually distinguish plugin-contributed UI from
+core UI — plugins feel native, not bolted on.
+
+**Required:**
+
+- **MUI components only.** Use `@mui/material` (provided by the host via import
+  map) for all UI elements — buttons, tables, dialogs, forms, typography, icons.
+  Do not import alternative component libraries (Ant Design, Chakra, etc.).
+- **Host theme.** Use the host's MUI `ThemeProvider` context (automatically
+  inherited). Do not override `createTheme()` or inject competing theme
+  providers. Access theme tokens via `useTheme()` or the `sx` prop.
+- **`sx` prop and `styled()` for styling.** Use MUI's `sx` prop or the `styled`
+  utility (Emotion-based, shared with the host) for custom styles. Do not
+  introduce separate CSS-in-JS runtimes (styled-components, Tailwind runtime,
+  Stitches, etc.) — multiple runtimes cause specificity conflicts and increase
+  bundle size.
+- **No global CSS.** Do not inject `<style>` tags, import `.css` files that
+  produce global selectors, or manipulate `document.styleSheets`. Global styles
+  can break the host or other plugins. Scoped styles via `sx`/`styled` are the
+  only permitted approach.
+- **Design tokens over magic values.** Reference `theme.palette`, `theme.spacing`,
+  `theme.typography`, and `theme.shape` rather than hard-coding pixel values,
+  hex colours, or font families. This ensures plugins respect light/dark mode and
+  future theme changes.
+- **Layout patterns.** Use MUI layout primitives (`Box`, `Stack`, `Grid`,
+  `Container`) for page structure. Follow the host's existing spacing rhythm
+  (typically `theme.spacing(2)` / `theme.spacing(3)` between sections).
+- **Icons.** Use `@mui/icons-material` (provided by the host). For custom icons
+  not in the MUI set, use inline SVG wrapped in `SvgIcon`.
+
+**Prohibited:**
+
+- Importing Tailwind CSS, Bootstrap, or any global utility-class framework.
+- Injecting a separate CSS reset or normalise stylesheet.
+- Using `!important` overrides on host elements.
+- Rendering outside the plugin's mounted container (e.g., appending to
+  `document.body` directly). Use MUI `Portal` if an overlay is needed.
+- Bundling custom fonts. Plugins inherit the host's font stack.
+
+**Enforcement:**
+
+- The `everestctl plugin lint` command (P1 DX tooling) will statically analyse
+  the bundle for prohibited imports and global CSS injection patterns.
+- The `@everest/plugin-sdk/testing` mock host renders plugins inside a real
+  `ThemeProvider` so visual regressions are caught in plugin unit tests.
+- The Plugin SDK's TypeScript types guide authors toward the correct patterns
+  at compile time (e.g., extension-point components receive `sx`-compatible
+  props rather than `className`).
 
 ## 9. Frontend SDK & Loading Model
 
@@ -275,8 +381,19 @@ At shell startup:
 New package at `ui/packages/plugin-sdk`. Public surface:
 
 ```ts
-// Registration
-registerExtension(point: ExtensionPoint, component: React.ComponentType<any>): void
+// Registration — extension object shape determines the contribution type.
+// Database-context extensions (clusterDetailTab, clusterAction, clusterCard)
+// accept an optional 'providers' field to restrict rendering by engine type.
+registerExtension(extension: Extension): void
+
+// Example: PostgreSQL-only detail tab
+api.registerExtension({
+  type: 'clusterDetailTab',
+  label: 'SQL Query',
+  path: 'sql-query',
+  component: SqlQueryTab,
+  providers: ['postgresql'],   // omit to show for all engine types
+});
 
 // Hooks — bridge to the host's React context
 useEverestApi(): EverestApiClient    // pre-authed HTTP client for /v1/...
@@ -428,6 +545,211 @@ This is exactly how the Kubernetes client-go informer handles the same problem; 
 - The plugin must stay connected (or reconnect quickly) to capture events. Plugins that don't tolerate stream gaps must persist their cursor before acknowledging work, and must implement the snapshot-then-watch fallback.
 - A plugin that holds the connection but processes events slowly will back-pressure the stream; the host will drop the slowest connections under memory pressure (advertised via a configurable per-connection buffer size). This is acceptable: dropped clients reconnect with `since=` and catch up.
 
+### 10.7 Infrastructure plugins — Kubernetes resource management
+
+Some plugins need to create and manage their own Kubernetes resources in response to database-cluster lifecycle events. Examples include ProxySQL (SQL proxy deployed per cluster), connection poolers, or monitoring sidecars. These are called **infrastructure plugins**.
+
+#### Declaring `kubePermissions`
+
+The plugin's `Plugin` CR declares the Kubernetes API permissions it needs under `spec.kubePermissions` (see §7.1). These are standard RBAC rule definitions: `apiGroups`, `resources`, `verbs`.
+
+```yaml
+kubePermissions:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+```
+
+#### Validation & denylist
+
+The host validates `kubePermissions` against a hard-coded **denylist** to prevent plugins from escalating beyond their intended scope. The following are always denied:
+
+- `*` (wildcard) in `apiGroups`, `resources`, or `verbs`.
+- `everest.percona.com` API group (OpenEverest CRDs).
+- `rbac.authorization.k8s.io` (RBAC manipulation).
+- `admissionregistration.k8s.io` (webhook manipulation).
+- Resources in `""` group: `secrets`, `nodes`, `persistentvolumes`.
+
+If any rule matches the denylist, the `Plugin` CR is rejected at admission time and the plugin pod is not started. A `ClusterRole` is always flagged for manual review.
+
+#### Automatic Role generation
+
+When a `PluginInstallation` is created in a namespace, the host:
+
+1. Creates a namespace-scoped `Role` from the declared `kubePermissions`, named `everest-plugin-<name>`.
+2. Creates a `RoleBinding` binding that `Role` to the plugin's `ServiceAccount`.
+3. On `PluginInstallation` deletion, the `Role` and `RoleBinding` are garbage-collected via `ownerReferences`.
+
+This ensures the plugin can only manage resources in namespaces where it is installed.
+
+#### Lifecycle integration — ProxySQL example
+
+The following illustrates how an infrastructure plugin would work, using ProxySQL as the canonical example:
+
+1. **Installation.** Admin installs the ProxySQL plugin. The `Plugin` CR declares `kubePermissions` for `apps/deployments` and `core/services,configmaps`. The admin creates a `PluginInstallation` in the target namespace.
+
+2. **Cluster creation.** User creates a new PXC cluster. In the create-instance wizard, the ProxySQL plugin's `instanceCreateFormSection` renders a "Enable ProxySQL" toggle and configuration fields (exposure mode, resource limits, custom rules).
+
+3. **Config handoff.** On form submission, the host POSTs the plugin config to `POST /v1/plugins/proxysql/instance-config` with the instance name, namespace, and the user's config blob. The plugin backend stores this config (e.g., in a ConfigMap).
+
+4. **Event-driven deployment.** The plugin daemon receives a `database-cluster.ready` event via SSE. It looks up the stored config for that instance, and creates a ProxySQL `Deployment`, `Service`, and `ConfigMap` with the appropriate selectors and connection details.
+
+5. **Detail tab.** The plugin registers a `clusterDetailTab` showing ProxySQL status, metrics, and a config editor. Changes submitted via the tab's UI are sent to the plugin backend, which updates the ProxySQL ConfigMap and triggers a rolling restart.
+
+6. **Cluster deletion.** The plugin receives a `database-cluster.deleted` event and cleans up the ProxySQL Deployment, Service, and ConfigMap. As a safety net, the plugin sets `ownerReferences` on all created resources pointing to the `DatabaseCluster` CR, so Kubernetes GC catches anything the plugin misses.
+
+#### Security boundaries
+
+- The plugin runs in its own pod with its own `ServiceAccount`. It never shares the host's credentials.
+- `kubePermissions` are additive and namespace-scoped. The plugin cannot access resources outside the namespaces where it is installed.
+- The host does not proxy or relay Kubernetes API calls. The plugin talks directly to the Kubernetes API server using its own bound credentials.
+- All plugin-created resources should carry standard labels (`app.kubernetes.io/managed-by: everest-plugin-<name>`) for auditability.
+
+### 10.8 Stateful plugins — Plugin-declared Custom Resources
+
+Some plugins need persistent, structured, namespace-scoped state that goes beyond what a ConfigMap or a plugin-managed database provides. Examples:
+
+- **Presets** — named configuration templates that pre-fill `InstanceSpec` fields during instance creation.
+- **Database user management** — CRs representing logical database users, reconciled by a plugin that provisions credentials in the target engines.
+- **Migration configs** — declarative schema migration state for a schema-management plugin.
+
+These plugins are called **stateful plugins**. They declare custom resource schemas in the `Plugin` manifest; the host installs, validates, and watches those CRDs; reconciliation events are forwarded to the plugin backend as HTTP callbacks. **No per-plugin operator is required.**
+
+#### Why not a separate operator per plugin?
+
+Forcing every stateful plugin to ship its own controller-runtime binary introduces:
+
+- An additional pod + ServiceAccount + leader election per plugin.
+- Race conditions between the plugin operator and the host controller when both react to Instance lifecycle events.
+- High DX barrier — plugin authors must learn controller-runtime, build Go binaries, manage CRD versions, and handle upgrades.
+
+The host-managed reconciliation model avoids all of this. The plugin author writes an HTTP handler; the host does the Kubernetes plumbing.
+
+#### Declaring custom resources
+
+A new `spec.customResources[]` field on the `Plugin` CR:
+
+```yaml
+apiVersion: core.openeverest.io/v1alpha1
+kind: Plugin
+metadata:
+  name: presets
+spec:
+  displayName: "Presets"
+  version: "1.0.0"
+  # ... frontend, backend, permissions as usual ...
+
+  # Custom resource declarations.
+  customResources:
+    - kind: Preset
+      # API group is always <pluginName>.plugins.openeverest.io
+      # (auto-derived; cannot be overridden)
+      scope: Namespaced
+      # OpenAPI v3 schema for spec validation (same format as CRD
+      # structural schemas). The host generates the full CRD from this.
+      schema:
+        type: object
+        properties:
+          provider:
+            type: string
+          version:
+            type: string
+          topology:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+          components:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+          backup:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+      # Status subresource is always enabled.
+      # Additional printer columns (optional).
+      additionalPrinterColumns:
+        - name: Provider
+          jsonPath: .spec.provider
+          type: string
+        - name: Version
+          jsonPath: .spec.version
+          type: string
+```
+
+The generated CRD will have:
+- Group: `presets.plugins.openeverest.io`
+- Version: `v1alpha1` (auto-assigned; plugin controls via manifest version)
+- Kind: `Preset`
+- Scope: Namespaced (restricted to namespaces where `PluginInstallation` exists)
+
+#### Host reconciliation model
+
+When a `Plugin` with `customResources` is installed, the host:
+
+1. **Generates the CRD** from the declared schema and applies it to the cluster. The CRD is owned by the `Plugin` CR (via `ownerReferences`) so it is garbage-collected on plugin uninstall.
+2. **Starts a dynamic informer** (using `dynamic.Interface` + `cache.Informer`) watching instances of the declared Kind in namespaces where the plugin is installed.
+3. **On CR create/update/delete**, the host calls the plugin backend:
+
+   ```
+   POST /v1/plugins/{pluginName}/reconcile
+   Content-Type: application/json
+
+   {
+     "event": "create" | "update" | "delete",
+     "object": { <full CR JSON> },
+     "old": { <previous version, on update only> },
+     "namespace": "team-alpha"
+   }
+   ```
+
+4. **Backend responds** with status + optional requeue:
+
+   ```json
+   {
+     "status": { "ready": true, "message": "Validated against provider schema" },
+     "requeue": false,
+     "requeueAfter": "0s"
+   }
+   ```
+
+5. **Host writes** the status subresource onto the CR and requeues if requested.
+
+If the backend is unreachable, the host retries with exponential backoff and sets a `Reconciling` condition on the CR.
+
+#### Namespace scoping
+
+Plugin CRs are only permitted in namespaces where a `PluginInstallation` exists for the declaring plugin. The host rejects (via a validating webhook or informer-level filter) any CR created in a namespace without a matching installation. This prevents tenants from creating plugin CRs in namespaces where the plugin is not enabled.
+
+#### Security & validation
+
+| Concern | Mitigation |
+|---|---|
+| API group hijacking | Plugin CRDs must live under `<pluginName>.plugins.openeverest.io`. The host rejects any other group. |
+| Schema size DoS | Maximum schema size: 64 KB (compressed). Enforced at admission. |
+| Kind collision | Kind names are globally unique within `plugins.openeverest.io`. The host rejects duplicates at Plugin create time. |
+| CRD manipulation | The plugin itself cannot modify or delete the CRD — only the host controller manages CRD lifecycle. The plugin's `kubePermissions` denylist blocks `apiextensions.k8s.io`. |
+| Orphaned CRs on uninstall | On Plugin deletion, the host deletes the CRD. Kubernetes cascades deletion to all CRs. Admin receives a warning if CRs exist. |
+| Reconcile endpoint abuse | The `/reconcile` call carries the host's internal service token, not user identity. The plugin backend verifies the token before acting. |
+
+#### Interaction with other plugin capabilities
+
+Stateful plugins typically combine custom resources with other capabilities:
+
+- **Frontend bundle** — UI components to create/edit/list plugin CRs (e.g., a Preset editor, a database-user manager).
+- **`instanceCreateFormSection`** — integrate plugin CRs into the Instance creation flow (e.g., "Select a Preset" dropdown).
+- **Event consumer** — react to Instance lifecycle events to trigger reconciliation of related plugin CRs.
+- **Request handler** — serve API endpoints that operate on plugin CRs (e.g., `POST /v1/plugins/presets/apply` to copy a Preset into a new Instance spec).
+
+#### Example: Presets plugin
+
+1. Admin installs the Presets plugin. The host creates the `Preset` CRD under `presets.plugins.openeverest.io`.
+2. Admin creates `PluginInstallation` in `team-alpha`. Users in that namespace can now create `Preset` CRs.
+3. A user creates a `Preset` named `production-large` with topology, component sizing, and backup config for their PXC clusters.
+4. The Presets backend receives the `/reconcile` call, validates the Preset content against the Provider schema (via `GET /v1/providers/{name}`), and returns status `{ ready: true }`.
+5. During Instance creation, the Presets plugin's `instanceCreateFormSection` shows a "Select Preset" dropdown. On selection, it fetches the Preset CR via the OpenEverest API and pre-fills the form.
+6. The host submits the filled form as a normal `Instance` create — the Preset is a one-time copy, not a live binding.
+
 ## 11. RBAC Integration
 
 OpenEverest already uses a Casbin policy model (`pkg/rbac`). Generic plugins slot into it without new concepts.
@@ -531,6 +853,8 @@ The `--from-tar` flag pushes images into the in-cluster registry if one is confi
 | Forged events | The event stream is delivered over the plugin's authenticated HTTPS connection to OpenEverest — there is no inbound push the plugin needs to validate. |
 | Event-driven privilege escalation | Events are informational only — they do not authorise the plugin to perform any action. Any follow-up API call still goes through normal RBAC checks. |
 | Slow event consumer / DoS on host | Per-connection bounded buffer; slow consumers are dropped and reconnect with `since=`. No unbounded queue grows in the host. |
+| Infrastructure plugin kube access | `kubePermissions` validated against a hard-coded denylist at admission time. Auto-generated `Role` is namespace-scoped; `ClusterRole` requests are flagged for manual review. Plugin never shares the host's `ServiceAccount`. |
+| Plugin creates orphaned resources | Plugin must handle `database-cluster.deleted` events to clean up. As a safety net, plugin-created resources should carry `ownerReferences` pointing to the `DatabaseCluster` CR for Kubernetes GC. |
 
 ## 15. Reference Architecture
 
@@ -586,7 +910,7 @@ graph TB
 > The earlier draft of this spec (§7) raised ten open questions. This section records the decisions.
 
 1. **Can generic plugins ship their own Kubernetes CRDs?**
-   No. CRDs are reserved for spec 001 Providers. Generic plugins interact with Kubernetes exclusively through the OpenEverest API.
+   Yes, with constraints. Plugins may declare custom resource schemas in their manifest under `spec.customResources[]`. The host generates, installs, and watches the resulting CRDs; reconciliation is handled by the plugin backend via HTTP callbacks (see §10.8). Plugins do **not** run their own operators. All plugin CRDs live under the `<pluginName>.plugins.openeverest.io` API group — plugins cannot declare CRDs in the `core.openeverest.io` group or any other core API group. CRDs for spec 001 Providers remain host-exclusive.
 
 2. **What is the minimal backend surface OpenEverest must expose?**
    The existing v1 API, plus four new additions:
@@ -655,7 +979,15 @@ Unlocks the metering / billing / audit / external-sync class of plugins.
 - Hard denylist on writes to spec-001 resources from daemon tokens.
 - **No event store, no delivery worker, no DLQ in the host.** State lives in etcd; cursor lives in the plugin.
 
-### Phase 4 — Rich UI extension points & distribution
+### Phase 4 — Infrastructure plugins & form extension points
+
+- `spec.kubePermissions` declaration and hard-coded denylist validation.
+- Automatic `Role` / `RoleBinding` generation from `kubePermissions` on `PluginInstallation` create; garbage-collection on delete.
+- `instanceCreateFormSection` and `instanceEditFormSection` extension points.
+- `POST /v1/plugins/{name}/instance-config` endpoint for plugin config handoff.
+- ProxySQL reference plugin as the canonical infrastructure plugin example.
+
+### Phase 5 — Rich UI extension points & distribution
 
 - Extension points: `clusterDetailTab`, `clusterAction`, `clusterCard`, `globalDashboardWidget`, `settingsPanel`.
 - `everestctl plugin run` shellout for CLI extensions.
@@ -663,7 +995,20 @@ Unlocks the metering / billing / audit / external-sync class of plugins.
 - Bundle SRI verification + optional cosign signature check.
 - Auto-generated `ServiceAccount` + `Role` + `NetworkPolicy` for backend pods.
 
-### Phase 5 — Polish & ecosystem
+### Phase 6 — Stateful plugins & plugin CRDs
+
+Unlocks plugins that need persistent, structured, namespace-scoped state without running their own operator.
+
+- `spec.customResources[]` declaration on the `Plugin` CR.
+- Dynamic CRD generation + installation from declared schemas.
+- Dynamic informer for plugin CRs (unstructured client, namespace-filtered).
+- `POST /v1/plugins/{name}/reconcile` endpoint — host calls plugin backend on CR create/update/delete; backend returns status + requeue.
+- Validating webhook (or informer filter) restricting plugin CRs to namespaces with a matching `PluginInstallation`.
+- Denylist: `apiextensions.k8s.io` added to `kubePermissions` denylist; Kind uniqueness enforced across all plugins.
+- Presets reference plugin as the canonical stateful-plugin example.
+- SDK helpers: `usePluginResources(kind)` hook for the frontend, `PluginResourceClient` for the backend.
+
+### Phase 7 — Polish & ecosystem
 
 - `themeOverride` extension point (branding / logos).
 - Plugin-to-plugin event bus (opt-in pub/sub via the SDK).
@@ -692,6 +1037,7 @@ The host stack is already well-shaped for this work — Echo + oapi-codegen for 
 
 1. **Event stream endpoint**. OpenEverest today has no plugin-facing change stream. The Phase-3 work is a `GET /v1/events` SSE handler that opens a kube watch on the relevant CRs (`DatabaseCluster`, `Instance`, `Backup`, `Restore`), normalises each watch event into the plugin-facing schema (§10.5), filters by the caller's RBAC and namespace scope, and writes the result as SSE frames. **No event bus, no delivery worker, no queue, no store** — state lives in etcd where it already does, and the cursor lives in the plugin. The reconcilers themselves don't need any modification because the kube watch sees the same status transitions they do.
 2. **Dynamic UI route registration**. React Router v6 prefers compile-time route trees. The pragmatic approach is a single wildcard route `/plugins/:pluginName/*` that dispatches to a `<PluginHost>` component which mounts whichever extension component the plugin registered. Sidebar items are pulled from React state populated at startup. Some Vite plumbing for an import map is also needed so plugin bundles can `import 'react'` and resolve to the host singleton.
+3. **Dynamic CRD management for stateful plugins** (Phase 6). The host must generate `CustomResourceDefinition` objects from plugin-declared schemas, install them, and watch instances via `dynamic.Interface` + custom informers. On CR mutations the host calls the plugin backend's `/reconcile` endpoint and writes back status. This is genuinely new infrastructure — `controller-runtime` does not natively support dynamic type registration, so a raw dynamic informer layer (similar to Crossplane's composite-resource watches) is needed. Estimated scope: ~1,500–2,500 LoC on top of the base plugin system.
 
 **Estimated change scope** (rough, not a commitment):
 
@@ -705,8 +1051,9 @@ The host stack is already well-shaped for this work — Echo + oapi-codegen for 
 | `everestctl plugin ...` ([commands/](commands/)) | new | 400–600 |
 | `@everest/plugin-sdk` ([ui/packages/](ui/packages/)) | new package | 400–600 |
 | UI dynamic loader + `<PluginHost>` ([ui/apps/everest/](ui/apps/everest/)) | modified | 300–500 |
+| Dynamic CRD manager + reconcile proxy (Phase 6) | new | 1,500–2,500 |
 | Tests + fixtures | new | 800–1200 |
-| **Total** | | **~3,450–5,350 LoC** |
+| **Total** | | **~4,950–7,850 LoC** |
 
 Dropping the durable event-bus subsystem trims roughly 700–1,100 LoC and a significant chunk of operational complexity (no store to back up, no DLQ to monitor, no delivery state to migrate during host upgrades). The phased roadmap (§17) defers the most invasive remaining parts (daemon mode, dynamic UI loader) to Phase 3+ so a Phase-1 MVP can ship with route + sidebar extension points only and validate the architecture.
 
@@ -717,6 +1064,8 @@ Dropping the durable event-bus subsystem trims roughly 700–1,100 LoC and a sig
 3. **RBAC scoping for `plugin/{name}`**. The current Casbin model uses glob matching on the resource field. A naive `plugin/*` policy line would grant access to all plugins. **Mitigation**: use specific per-plugin policy lines, not wildcards, and reject wildcard plugin policies in the policy editor.
 4. **Dynamic React Router**. Workable but easy to get wrong (history scope, error boundaries, nested routes). **Mitigation**: prototype the `<PluginHost>` wrapper early in Phase 1.
 5. **API backward compatibility**. Once plugins ship, breaking response shapes (including the event envelope in §10.5) breaks plugins. **Mitigation**: lock the plugin-facing subset of `/v1` early (discovery, plugin-context, connection-details, events) and treat it as a stability boundary; version the event envelope explicitly.
+6. **Dynamic informer lifecycle** (Phase 6). Plugin CRDs are installed at runtime; informers must be started/stopped as plugins are installed or removed. A stale informer watching a deleted CRD will error-loop. **Mitigation**: wrap dynamic informers in a manager that tracks CRD existence via a watch on `apiextensions.k8s.io/v1/customresourcedefinitions`; tear down informers when the CRD disappears. Crossplane solves this same problem with `engine.Start()/Stop()` per composite resource.
+7. **Reconcile endpoint reliability** (Phase 6). If the plugin backend is down, CRs pile up in a pending state. **Mitigation**: exponential backoff with jitter; status condition `Reconciling=Unknown, reason=BackendUnreachable`; surface on `PluginInstallation` status. No silent data loss — CRs stay in etcd, the informer retries.
 
 ### 18.3 Plugin author developer experience
 
@@ -783,9 +1132,15 @@ Total DX investment: **roughly 4–6 person-weeks for P0, plus another 4–6 for
 
 7. **Event delivery model**: pull-based SSE stream over kube watch (decided, §10.5). The earlier draft proposed a push-based bus with a server-side queue; that introduced unwanted state in the host (delivery log, retry queue, DLQ, durability across restarts). The pull model puts the cursor on the plugin side and keeps the host stateless. Open sub-question: do we ever need a push variant for SaaS / off-cluster consumers that cannot hold an inbound connection? If so, a small webhook bridge plugin ("event forwarder") could be built on top of the pull stream without bringing state into the core.
 
-8. **Synchronous (pre-) hooks**: this design covers post-hoc, fire-and-forget events only. Should we also support **synchronous validating hooks** (e.g., "before creating a cluster, ask the policy plugin to approve")? That class of plugin sits closer to a Kubernetes admission webhook and may justify a separate spec; explicitly out of scope for v1.
+8. **Synchronous (pre-) hooks**: this design covers post-hoc, fire-and-forget events only. Should we also support **synchronous validating hooks** (e.g., "before creating a cluster, ask the policy plugin to approve")? That class of plugin sits closer to a Kubernetes admission webhook and may justify a separate spec; explicitly out of scope for v1. *Note:* the `instanceCreateFormSection` extension point (§8, §10.7) partially addresses the "user opts in at creation time" use case — it lets a plugin collect configuration during instance creation and act on it asynchronously, without requiring a synchronous pre-hook in the host.
 
 9. **Daemon scaling**: does the host enforce single-replica daemons (simpler, no distributed-lock concerns) or allow plugin authors to declare a replica count? Multi-replica daemons need event delivery to be load-balanced across replicas in a partition-aware way — non-trivial. Single-replica is the recommended Phase 3 starting point.
+
+10. **Plugin CRD schema evolution**: when a plugin upgrades and its declared schema changes, existing CRs may become invalid. Options: (a) require backward-compatible schema changes only (additive fields, no removals), (b) support multiple CRD versions with conversion (complex, mirrors kube-native CRD versioning), (c) plugin owns migration via a one-time reconcile pass on upgrade. Leaning toward (a) with (c) as an escape hatch. Needs decision before Phase 6.
+
+11. **Dynamic informer lifecycle**: `controller-runtime` assumes static type registration at manager startup. Plugin CRDs require either restarting the manager (disruptive) or using raw `dynamic.Interface` + custom informers outside the manager. The latter is feasible (Crossplane, KubeVela use this pattern) but loses some controller-runtime ergonomics. Prototype needed in Phase 6.
+
+12. **Presets: core CRD vs. plugin CRD**: Presets could be shipped as either a first-class core CRD (like Instance, Provider) or as the first stateful plugin exercising the Phase 6 mechanism. Core CRD ships faster and integrates tighter with Instance validation; plugin CRD validates the extensibility model. Decision: start with a core `Preset` CRD to unblock the feature quickly, then optionally migrate to a plugin once Phase 6 lands — or keep it core if the tight validation integration proves essential.
 
 ## 20. Definition of Done
 
