@@ -497,6 +497,21 @@ Delivered as Server-Sent Events (SSE). Each event carries the underlying Kuberne
 | `backup.failed` | A backup job fails. |
 | `restore.started` / `restore.completed` / `restore.failed` | Same for restores. |
 | `instance.created` / `instance.deleted` | spec-001 `Instance` lifecycle. |
+| `user.login` | A user successfully authenticates (local or OIDC). |
+| `user.login-failed` | An authentication attempt fails. |
+| `user.logout` | A user session is invalidated. |
+| `plugin.installed` | A `Plugin` CR is created. |
+| `plugin.uninstalled` | A `Plugin` CR is deleted. |
+| `plugin.enabled` | A plugin becomes ready (enabled via `Plugin` CR or `PluginInstallation` created). |
+| `plugin.disabled` | A plugin becomes not-ready (disabled via `Plugin` CR or `PluginInstallation` deleted). |
+| `namespace.added` | A namespace is registered with OpenEverest. |
+| `namespace.removed` | A namespace is removed from OpenEverest. |
+| `settings.updated` | Platform settings are modified. |
+
+Events are sourced from two mechanisms:
+
+1. **Kubernetes watches** — the event hub watches `DatabaseCluster`, `Backup`, `Restore`, `Instance`, `Plugin`, and `PluginInstallation` CRs. Changes are normalised into the event envelope and broadcast to subscribers.
+2. **Direct publish** — API handlers that do not correspond to a watched CR (session create/delete, settings update) call `Hub.Publish()` directly to emit events into the same fan-out pipeline.
 
 **Event envelope.**
 
