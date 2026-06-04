@@ -153,7 +153,7 @@ spec:
 
 ### Fetching Presets via API
 
-Presets are fetched through a RESTful API that pre-fills namespace/cluster defaults and prepares Instance configuration for the UI. 
+Presets are fetched through a RESTful API that pre-fills namespace/cluster defaults and prepares Instance configuration for the UI.
 
 **List Presets:**
 ```
@@ -254,6 +254,10 @@ GET /clusters/{cluster}/presets/{name}?namespace={namespace}
 #### 🔮 Phase 2 (Custom Values & Preset Management)
 
 **Goal:** Users can edit Instance values during Instance creation from preset and admins can manage custom presets
+
+**Overview:**
+Users are able to edit Instance populated from preset.
+It also gives users ability to manage presets on OpenEverest UI. While UI specific for presets can be integrated into OpenEverest, alternative is implementing presets management via Generic Plugin.
 
 **User Stories:**
 - As a user, I can edit preset values before creating an Instance
