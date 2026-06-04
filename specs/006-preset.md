@@ -4,7 +4,7 @@
 *   **Authors:** @chilagrow
 *   **Created:** 2026-06-04
 *   **Last Updated:** 2026-06-04
-*   **Related Issues:** [Link to relevant GitHub issues, e.g., openeverest/openeverest#123]
+*   **Related Issues:** [openeverest/openeverest#1820]
 
 ---
 
@@ -151,7 +151,7 @@ spec:
         keep: 7
 ```
 
-#### Fetching Presets via API
+### Fetching Presets via API
 
 Presets are fetched through a RESTful API that pre-fills namespace/cluster defaults and prepares Instance configuration for the UI. 
 
@@ -308,9 +308,9 @@ spec:
 
 **Phase 1:** Preset CRD + pre-installed CRs + API with default resolution + UI selector
 
-**Phase 2:** Editable UI + Preset CRUD API + RBAC + "Save as Preset"
+**Phase 2:** Editable Instance UI + Preset CRUD API + RBAC + "Create Preset from instance"
 
-**Phase 3:** Controller + policy annotations + status field
+**Phase 3:** Controller + policy annotations
 
 ## 6. Alternatives Considered
 
@@ -326,8 +326,8 @@ spec:
 
 - Preset versioning during Helm upgrades
 - Phase 3: Default policy (`manual` vs `auto-update`), rollback mechanism, controller scope
-- Phase 2: RBAC (K8s RBAC vs API-layer filtering)
 - Error handling: Deleted defaults, secret validation, deleted preset
-- Preset validation: At creation vs runtime
 
 ## 8. References
+
+- https://github.com/openeverest/openeverest/issues/1820
