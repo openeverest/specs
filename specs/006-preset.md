@@ -25,6 +25,7 @@ Currently, deploying an Instance requires users to manually configure each compo
 
 **Non-Goals:**
 *   Cross-provider sharing of presets — Presets are scoped to a single provider and cannot be shared across providers.
+*   Supporting One-click deployment via `kubectl`.
 *   User-facing preset creation/editing UI in Phase 1.
 *   Bulk update propagation in Phase 1.
 
