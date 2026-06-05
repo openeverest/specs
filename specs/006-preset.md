@@ -33,7 +33,7 @@ Currently, deploying an Instance requires users to manually configure each compo
 
 ### Preset CR
 
-**Cluster-scoped** template mirroring Instance spec. Empty fields (StorageClass, MonitoringConfig, Secrets) are pre-filled by API when fetched with namespace parameter. Instances are detached after creation.
+Preset is a cluster scope configuration template mirroring Instance spec. Is it not a namespace-scoped resource to avoid users from define Preset for each namespace. Natually, Preset does not contain namespace-scoped resources and they are left empty. Preset API provides ways to pre-fill empty namespace-scoped fields (StorageClass, MonitoringConfig, Secrets) when fetched with namespace parameter. Instances are created by copying values from Preset and contains annotation reference to originating Preset. 
 
 **Example Preset CR:**
 
@@ -82,25 +82,89 @@ spec:
 
 #### Default Resource Pre-filling
 
-When fetching a Preset via API with a namespace parameter, empty fields are pre-filled using annotation-based defaults from that namespace/cluster.
+When fetching a Preset via API with a namespace parameter, empty fields are pre-filled using annotation-based defaults from that namespace/cluster. This is the approach used for Kubernetes `PVC` to discover `StorageClass` by looking for annotation `storageclass.kubernetes.io/is-default-class: "true"`. If more than one resources is set default, the most recently created resource is selected.
 
-**How API determines resource type:**
-The field structure in Instance spec indicates what resource to look for:
-- String field `storageClass` → Look for `storageclass.kubernetes.io` `StorageClass` resource
-- String field `monitoringConfigName` → Look for `monitoring.openeverest.io/v1alpha1` `MonitoringConfig` CRD
-- Object field `secretName` → Look for `Secret` resource
-- Object field `configMapName` → Look for `ConfigMap` resource
+Preset pre-filling determines which resource to look for by the field name.:
+- Field `storageClass`, `storageClassRef` `storageClassName` → Look for `storageclass.kubernetes.io` `StorageClass` resource
+- Field `monitoringConfig`, `monitoringConfigRef`, `monitoringConfigName` → Look for `monitoring.openeverest.io/v1alpha1` `MonitoringConfig` CRD
+- Field `secret`, `secretRef`, `secretName` → Look for `Secret` resource
+- Field `configMap`, `configMapRef`, `configMapName` → Look for `ConfigMap` resource
 
-**Default Resolution:**
-- **StorageClass**: `storageclass.kubernetes.io/is-default-class: "true"`
-- **MonitoringConfig**: `openeverest.io/is-default: "true"` in namespace
-- **Secrets/ConfigMaps**: `openeverest.io/is-default-{field-path}` (purpose-specific)
-  - Example: `spec.components.splithorizon.customSpec.tls.secretName` → `openeverest.io/is-default-components-splithorizon-customspec-tls`
-- **Not found**: Optional fields omitted, required fields empty (creation fails)
+While default annotation is sufficient for CR, secrets and configMaps require additional information to determine which field it is used by. Instance CR may reference multiple secrets and configMaps. For Kubernete resource `StorageClass`, the annotation set by Kubernetes is used. For OpenEverest CRs, `openeverest.io/is-default: "true"` is used.
+
+- `StorageClass` → `storageclass.kubernetes.io/is-default-class: "true"`
+- `MonitoringConfig` → `openeverest.io/is-default: "true"`
+
+For secrets and configMaps, additioanl path information is included in the annotation. Using `openeverest.io/is-default-{field-path}` format. The default annotation for the field `spec.components.splithorizon.customSpec.tls.secretName` is `openeverest.io/is-default-components-splithorizon-customspec-tls: "true"`.
+
+The annotation creation is done using CLI. 
+
+```
+kubectl annotate MonitoringConfig <monitoring-config-name> openeverst.io/is-default="true" --overwrite
+```
+
+#### Fetching Presets via API
+
+```
+GET /clusters/{cluster}/presets
+GET /clusters/{cluster}/presets?provider={provider}
+GET /clusters/{cluster}/presets/{name}
+GET /clusters/{cluster}/presets/{name}?namespace={namespace}
+```
+
+Presets are fetched through a RESTful API that pre-fills namespace/cluster defaults and prepares Instance configuration for the UI.
+
+When `namespace` query parameter is provided, the API returns the Preset CR with namespace/cluster defaults pre-filled:
+
+```
+GET /clusters/{cluster}/presets/{name}?namespace={namespace}
+```
+
+```json
+{
+  "apiVersion": "core.openeverest.io/v1alpha1",
+  "kind": "Preset",
+  "metadata": {
+    "name": "mongodb-production",
+    "resourceVersion": "1",
+    "annotations": {
+      "openeverest.io/preset": "mongodb-production"
+    }
+  },
+  "spec": {
+    "provider": "percona-server-mongodb",
+    "components": {
+      "engine": {
+        "replicas": 3,
+        "resources": {
+          "limits": {
+            "cpu": "1",
+            "memory": "4Gi"
+          }
+        },
+        "storage": {
+          "size": "25Gi",
+          "storageClass": "local-path"
+        },
+        "monitoring": {
+          "customSpec": {
+            "monitoringConfigName": "config"
+          }
+        }
+      }
+    },
+    "deletionPolicy": "Cascade",
+    "topology": {
+      "type": "replicaSet"
+    },
+    "version": "8.0.12"
+  }
+}
+```
 
 ### Instance CR
 
-Instance CR is **Self-contained** and with spec explictly defined from Preset CR. The `openeverest.io/preset: {name}` annotation is added for tracking.
+Instance CR spec is explictly defined from Preset CR. The `openeverest.io/preset: {name}` annotation is added for tracking.
 
 **Example Instance CR:**
 
@@ -151,67 +215,9 @@ spec:
         keep: 7
 ```
 
-### Fetching Presets via API
-
-Presets are fetched through a RESTful API that pre-fills namespace/cluster defaults and prepares Instance configuration for the UI.
-
-**List Presets:**
-```
-GET /clusters/{cluster}/presets
-GET /clusters/{cluster}/presets?provider={provider}
-GET /clusters/{cluster}/presets/{name}
-GET /clusters/{cluster}/presets/{name}?namespace={namespace}
-```
-
-When `namespace` query parameter is provided, the API returns the Preset CR with namespace/cluster defaults pre-filled:
-
-```
-GET /clusters/{cluster}/presets/{name}?namespace={namespace}
-```
-
-```json
-{
-  "apiVersion": "core.openeverest.io/v1alpha1",
-  "kind": "Preset",
-  "metadata": {
-    "name": "mongodb-production",
-    "resourceVersion": "1",
-    "annotations": {
-      "openeverest.io/preset": "mongodb-production"
-    }
-  },
-  "spec": {
-    "provider": "percona-server-mongodb",
-    "components": {
-      "engine": {
-        "replicas": 3,
-        "resources": {
-          "limits": {
-            "cpu": "1",
-            "memory": "4Gi"
-          }
-        },
-        "storage": {
-          "size": "25Gi",
-          "storageClass": "local-path"
-        },
-        "monitoring": {
-          "customSpec": {
-            "monitoringConfigName": "config"
-          }
-        }
-      }
-    },
-    "deletionPolicy": "Cascade",
-    "topology": {
-      "type": "replicaSet"
-    },
-    "version": "8.0.12"
-  }
-}
-```
-
 ### OpenEverest UI
+
+The OpenEverest UI fetches available Presets from a provider.
 
 **Phase 1 UI Flow:**
 
@@ -220,18 +226,16 @@ GET /clusters/{cluster}/presets/{name}?namespace={namespace}
    GET /clusters/{cluster}/presets?provider=percona-server-mongodb
    ```
 
-2. **User Selects Preset**: UI shows preset descriptions/metadata
-
-3. **Fetch Preset with Namespace Defaults**: UI fetches preset with defaults pre-filled
+2. **User Selects Preset and namespace**: UI fetches preset with defaults pre-filled
    ```
    GET /clusters/${cluster}/presets/mongodb-production?namespace=prod
    ```
 
-4. **Pre-fill Form**: UI populates Instance creation form with Preset values
+3. **Pre-fill Form**: UI populates Instance creation form with Preset values
 
-5. **User Overrides** (Phase 1: read-only preview, Phase 2: editable): User can review values
+4. **User Overrides** (Phase 1: read-only preview, Phase 2: editable): User can review values
 
-6. **Create Instance**: UI constructs and submits Instance CR
+5. **Create Instance**: UI constructs and submits Instance CR
 
 ### Phased Rollout
 
