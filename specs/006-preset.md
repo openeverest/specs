@@ -33,7 +33,7 @@ Currently, deploying an Instance requires users to manually configure each compo
 
 ### Preset CR
 
-Preset is a cluster scope configuration template mirroring Instance spec. Is it not a namespace-scoped resource to avoid users from define Preset for each namespace. Natually, Preset does not contain namespace-scoped resources and they are left empty. Preset API provides ways to pre-fill empty namespace-scoped fields (StorageClass, MonitoringConfig, Secrets) when fetched with namespace parameter. Instances are created by copying values from Preset and contains annotation reference to originating Preset. 
+Preset is a cluster-scoped configuration template mirroring Instance spec. It is not a namespace-scoped resource to avoid users from defining Presets for each namespace. Naturally, Preset does not contain namespace-scoped resources and they are left empty. Preset API provides ways to pre-fill empty namespace-scoped fields (StorageClass, MonitoringConfig, Secrets) when fetched with namespace parameter. Instances are created by copying values from Preset and contain annotation references to the originating Preset. 
 
 **Example Preset CR:**
 
@@ -54,53 +54,40 @@ spec:
         limits:
           cpu: "1"
           memory: 4Gi
-        requests:
-          cpu: "500m"
-          memory: 2Gi
       storage:
         size: 25Gi
         storageClass: ""  # Empty - resolved from cluster default
-      monitoring:
-        enabled: true
-        customSpec:
-          monitoringConfigName: ""  # Empty - resolved from namespace default once namespace is supplied
-  
-  deletionPolicy: Cascade
-  
+    monitoring:
+      customSpec:
+        monitoringConfigName: ""  # Empty - resolved from namespace default once namespace is supplied
+    
   topology:
     type: replicaSet
   
   version: "8.0.12"
-  
-  backup:
-    enabled: true
-    schedules:
-      - name: daily
-        schedule: "0 2 * * *"
-        keep: 7
 ```
 
 #### Default Resource Pre-filling
 
-When fetching a Preset via API with a namespace parameter, empty fields are pre-filled using annotation-based defaults from that namespace/cluster. This is the approach used for Kubernetes `PVC` to discover `StorageClass` by looking for annotation `storageclass.kubernetes.io/is-default-class: "true"`. If more than one resources is set default, the most recently created resource is selected.
+When fetching a Preset via API with a namespace parameter, empty fields are pre-filled using annotation-based defaults from that namespace/cluster. This is the approach used for Kubernetes `PVC` to discover `StorageClass` by looking for annotation `storageclass.kubernetes.io/is-default-class: "true"`. If more than one `StorageClass` is set default, the most recently created `StorageClass` is selected.
 
-Preset pre-filling determines which resource to look for by the field name.:
-- Field `storageClass`, `storageClassRef` `storageClassName` → Look for `storageclass.kubernetes.io` `StorageClass` resource
+Preset pre-filling determines which resource to look for by the field name:
+- Field `storageClass`, `storageClassRef`, `storageClassName` → Look for `storageclass.kubernetes.io` `StorageClass` resource
 - Field `monitoringConfig`, `monitoringConfigRef`, `monitoringConfigName` → Look for `monitoring.openeverest.io/v1alpha1` `MonitoringConfig` CRD
 - Field `secret`, `secretRef`, `secretName` → Look for `Secret` resource
 - Field `configMap`, `configMapRef`, `configMapName` → Look for `ConfigMap` resource
 
-While default annotation is sufficient for CR, secrets and configMaps require additional information to determine which field it is used by. Instance CR may reference multiple secrets and configMaps. For Kubernete resource `StorageClass`, the annotation set by Kubernetes is used. For OpenEverest CRs, `openeverest.io/is-default: "true"` is used.
+While default annotation is sufficient for CRs, secrets and configMaps require additional information to determine which field they are used by. Instance CR may reference multiple secrets and configMaps. For Kubernetes resource `StorageClass`, the annotation set by Kubernetes is used. For OpenEverest CRs, `openeverest.io/is-default: "true"` is used.
 
 - `StorageClass` → `storageclass.kubernetes.io/is-default-class: "true"`
 - `MonitoringConfig` → `openeverest.io/is-default: "true"`
 
-For secrets and configMaps, additioanl path information is included in the annotation. Using `openeverest.io/is-default-{field-path}` format. The default annotation for the field `spec.components.splithorizon.customSpec.tls.secretName` is `openeverest.io/is-default-components-splithorizon-customspec-tls: "true"`.
+For secrets and configMaps, additional path information is included in the annotation using `openeverest.io/is-default-{field-path}` format. The default annotation for the field `spec.components.splithorizon.customSpec.tls.secretName` is `openeverest.io/is-default-components-splithorizon-customspec-tls: "true"`.
 
-The annotation creation is done using CLI. 
+The annotation creation is done using CLI: 
 
 ```
-kubectl annotate MonitoringConfig <monitoring-config-name> openeverst.io/is-default="true" --overwrite
+kubectl annotate MonitoringConfig <monitoring-config-name> openeverest.io/is-default="true" --overwrite
 ```
 
 #### Fetching Presets via API
@@ -126,7 +113,6 @@ GET /clusters/{cluster}/presets/{name}?namespace={namespace}
   "kind": "Preset",
   "metadata": {
     "name": "mongodb-production",
-    "resourceVersion": "1",
     "annotations": {
       "openeverest.io/preset": "mongodb-production"
     }
@@ -146,14 +132,13 @@ GET /clusters/{cluster}/presets/{name}?namespace={namespace}
           "size": "25Gi",
           "storageClass": "local-path"
         },
-        "monitoring": {
-          "customSpec": {
-            "monitoringConfigName": "config"
-          }
+      },
+      "monitoring": {
+        "customSpec": {
+          "monitoringConfigName": "config"
         }
       }
     },
-    "deletionPolicy": "Cascade",
     "topology": {
       "type": "replicaSet"
     },
@@ -164,7 +149,7 @@ GET /clusters/{cluster}/presets/{name}?namespace={namespace}
 
 ### Instance CR
 
-Instance CR spec is explictly defined from Preset CR. The `openeverest.io/preset: {name}` annotation is added for tracking.
+Instance CR spec is explicitly defined from Preset CR. The `openeverest.io/preset: {name}` annotation is added for tracking.
 
 **Example Instance CR:**
 
@@ -189,30 +174,17 @@ spec:
         limits:
           cpu: "1"          # FROM PRESET
           memory: 4Gi       # FROM PRESET
-        requests:
-          cpu: "500m"       # FROM PRESET
-          memory: 2Gi       # FROM PRESET
       storage:
         size: 25Gi
         storageClass: local-path  # RESOLVED from cluster default
-      monitoring:
-        enabled: true
-        customSpec:
-          monitoringConfigName: config  # RESOLVED from namespace default
-  
-  deletionPolicy: Cascade
-  
+    monitoring:
+      customSpec:
+        monitoringConfigName: config  # RESOLVED from namespace default
+    
   topology:
     type: replicaSet
   
   version: "8.0.12"
-  
-  backup:
-    enabled: true
-    schedules:
-      - name: daily
-        schedule: "0 2 * * *"
-        keep: 7
 ```
 
 ### OpenEverest UI
@@ -243,6 +215,9 @@ The OpenEverest UI fetches available Presets from a provider.
 
 **Goal:** One-click deployment with pre-configured presets
 
+### Validation
+- The pre-installed Preset CR ships with known-valid values.
+
 **User Stories:**
 - As a user, I can deploy an Instance with one click, and the system applies a preset automatically
 - As a user, I can select which preset to use when multiple presets exist
@@ -260,12 +235,16 @@ The OpenEverest UI fetches available Presets from a provider.
 **Goal:** Users can edit Instance values during Instance creation from preset and admins can manage custom presets
 
 **Overview:**
-Users are able to edit Instance populated from preset.
-It also gives users ability to manage presets on OpenEverest UI. While UI specific for presets can be integrated into OpenEverest, alternative is implementing presets management via Generic Plugin.
+Users are able to edit Instances populated from presets.
+Users can create a preset from an Instance.
+It also gives users the ability to manage presets on OpenEverest UI. While UI specific for presets can be integrated into OpenEverest, an alternative is implementing preset management via Generic Plugin.
+
+### Validation
+- A Preset CR follows the same validation rules as an Instance CR.
+- Namespace-scoped and cluster-scoped fields are left empty and disabled from modifying.
 
 **User Stories:**
 - As a user, I can edit preset values before creating an Instance
-- As a user, I can compare my edits with preset defaults
 - As a user, I can create a new preset based on a running Instance
 - As an admin, I can create and manage presets in the UI
 - As an admin, I can control which presets are visible to which users/roles
@@ -277,9 +256,10 @@ It also gives users ability to manage presets on OpenEverest UI. While UI specif
 **Goal:** Help users apply preset updates
 
 **Overview:**
-Phase 1 & 2 keep Instances **fully detached** from Presets after creation. Phase 3 adds detection and user-approval or automatic workflow for preset updates.
+Phase 1 & 2 keep Instances fully detached from Presets after creation. Phase 3 adds detection and user-approval or automatic workflow for preset updates.
 
-**Policy annotation controls sync behavior:**
+The default flow for updating Preset is not to update Instances using the Preset. Updating Instance is disruptive and should not be updated without user approval. The instance may be assigned a preset policy which explicitly allows updates upon Preset change. 
+
 ```yaml
 apiVersion: core.openeverest.io/v1alpha1
 kind: Instance
@@ -287,20 +267,17 @@ metadata:
   name: my-mongodb
   annotations:
     openeverest.io/preset: "mongodb-production"
-    openeverest.io/preset-policy: "auto-update"
+    openeverest.io/preset-policy: "auto-update" # manual (default) or auto-update
 spec:
   # ... instance configuration
 ```
 
-**Preset Policy values:**
-- `manual` (default) - No automatic updates, requires API/UI manual approval
-- `auto-update` - Controller automatically updates Instance when Preset changes
+Manual approval flow in UI may be implemented (upon needs):
 
-**Detection (At Preset Update Time):**
-- Upon an admin updates a Preset, lists Instances with `openeverest.io/preset: {preset-name}` annotation
-- Shows admin impact analysis before saving: "3 instances will be affected"
-- Admin reviews proposed changes for their Instances and approves/rejects per Instance
-- Updating Preset triggers updating approved instances
+1. Upon an admin updates a Preset, lists Instances with `openeverest.io/preset: {preset-name}` annotation
+2. Shows admin impact analysis before saving: "3 instances will be affected"
+3. Admin reviews proposed changes for their Instances and approves/rejects per Instance
+4. Updating Preset triggers updating approved instances
 
 **User Stories:**
 - As an admin, I can update a preset and see which Instances reference it
@@ -308,15 +285,11 @@ spec:
 - As a user, I can approve or reject the update per Instance
 - As an admin, I can see which Instances are "out of sync" with latest preset
 
-### Validation
-- The pre-installed Preset CR ships with known-valid values.
-- A Preset CR follows the **same validation rules** as an Instance CR; runtime validation will be added in a future phase when users can create/edit presets via the UI.
-
 ## 5. Definition of Done
 
 **Phase 1:** Preset CRD + pre-installed CRs + API with default resolution + UI selector
 
-**Phase 2:** Editable Instance UI + Preset CRUD API + RBAC + "Create Preset from instance"
+**Phase 2:** Editable Instance UI (or Generic Plugin) + Preset CRUD API + RBAC + "Create Preset from instance"
 
 **Phase 3:** Controller + policy annotations
 
@@ -324,9 +297,8 @@ spec:
 
 **Rejected:**
 - ConfigMap-based: No validation, versioning
-- Preset reference in Instance.spec: Not self-contained, breaks GitOps, dangling refs
+- Preset reference in Instance.spec: Not self-contained requiring merging Preset and Instance.Spec in webhook or in-memory in controller
 - Client-side pre-filling: Complex UI logic, inconsistent
-- Using annotation only without populating Instance: complex merge of status
 
 **Chosen:** Cluster-scoped CR mirroring Instance spec, backend API pre-fills defaults, annotation tracking, instances detached after creation.
 
