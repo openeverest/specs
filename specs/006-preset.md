@@ -33,7 +33,7 @@ Currently, deploying an Instance requires users to manually configure each compo
 
 ### Preset CR
 
-Preset is a cluster-scoped configuration template mirroring Instance spec. It is not a namespace-scoped resource to avoid users from defining Presets for each namespace. Naturally, Preset does not contain namespace-scoped resources and they are left empty. Preset API provides ways to pre-fill empty namespace-scoped fields (StorageClass, MonitoringConfig, Secrets) when fetched with namespace parameter. Instances are created by copying values from Preset and contain annotation references to the originating Preset. 
+Preset is a cluster-scoped configuration template mirroring Instance spec. It is not a namespace-scoped resource to avoid users from defining Presets for each namespace. Naturally, Preset does not contain namespace-scoped resources and those fields are left empty. Preset API provides ways to pre-fill empty namespace-scoped fields (StorageClass, MonitoringConfig, Secrets) when fetched with namespace parameter. Instances are created by copying values from Preset and contain annotation references to the originating Preset. 
 
 **Example Preset CR:**
 
@@ -191,7 +191,7 @@ spec:
 
 The OpenEverest UI fetches available Presets from a provider.
 
-**Phase 1 UI Flow:**
+**Phase 1 UI Flow for creating Instance:**
 
 1. **List Presets**: UI fetches available presets for selected provider
    ```
