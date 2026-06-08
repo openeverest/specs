@@ -67,7 +67,7 @@ spec:
       customSpec:
         monitoringConfigName: "" # Namespace-scoped MonitoringConfig is empty - resolve from namespace default with annotation "openeverest.io/is-default-components-monitoring"
     
-    splithorizon:
+    splithorizon: # Example to showcase usage for component not yet available
       type: splithorizon
       config:
         secretRef:
@@ -75,13 +75,13 @@ spec:
       customSpec:
         domain: example.com
     
-    loadbalancer:
+    loadbalancer: # Example to showcase usage for component not yet available
       type: loadbalancer
       customSpec:
         annotations:
           annot-1: "value-1"
     
-    podSchedulingPolicy:
+    podSchedulingPolicy: # Example to showcase usage for component not yet available
       type: podSchedulingPolicy
       customSpec:
         engine:
@@ -90,8 +90,6 @@ spec:
               - podAffinityTerm:
                   topologyKey: kubernetes.io/hostname
                 weight: 1
-        proxy:
-        configServer:
     
   topology:
     type: replicaSet
@@ -159,6 +157,8 @@ Returns all installed presets with:
 GET /clusters/{cluster}/presets
 ```
 
+**Response:** Array of preset objects.
+
 ```json
 [{
   "apiVersion": "core.openeverest.io/v1alpha1",
@@ -191,7 +191,7 @@ GET /clusters/{cluster}/presets
           "monitoringConfigName": "" // empty when namespace is unknown
         }
       },
-      "splithorizon": {
+      "splithorizon": { // Example to showcase usage for component not yet available
         "type": "splithorizon",
         "config": {
           "secretRef": {
@@ -202,7 +202,7 @@ GET /clusters/{cluster}/presets
           "domain": "example.com"
         }
       },
-      "loadbalancer": {
+      "loadbalancer": { // Example to showcase usage for component not yet available
         "type": "loadbalancer",
         "customSpec": {
           "annotations": {
@@ -210,7 +210,7 @@ GET /clusters/{cluster}/presets
           }
         }
       },
-      "podSchedulingPolicy": {
+      "podSchedulingPolicy": { // Example to showcase usage for component not yet available
         "type": "podSchedulingPolicy",
         "customSpec": {
           "engine": {
@@ -236,8 +236,6 @@ GET /clusters/{cluster}/presets
 }]
 ```
 
-**Response:** Array of preset objects with cluster defaults resolved.
-
 #### 2. Filter by Provider
 
 Returns presets for a specific provider.
@@ -252,6 +250,12 @@ GET /clusters/{cluster}/presets?provider=percona-server-mongodb
 
 Returns a specific preset with:
 - Namespace-scoped fields empty (e.g., `monitoringConfigName` → "")
+
+```
+GET /clusters/{cluster}/presets/{name}
+```
+
+**Response:** Preset object with empty namespace-scoped fields.
 
 ```json
 {
@@ -285,7 +289,7 @@ Returns a specific preset with:
           "monitoringConfigName": "" // empty when namespace is unknown
         }
       },
-      "splithorizon": {
+      "splithorizon": { // Example to showcase usage for component not yet available
         "type": "splithorizon",
         "config": {
           "secretRef": {
@@ -296,7 +300,7 @@ Returns a specific preset with:
           "domain": "example.com"
         }
       },
-      "loadbalancer": {
+      "loadbalancer": { // Example to showcase usage for component not yet available
         "type": "loadbalancer",
         "customSpec": {
           "annotations": {
@@ -304,7 +308,7 @@ Returns a specific preset with:
           }
         }
       },
-      "podSchedulingPolicy": {
+      "podSchedulingPolicy": { // Example to showcase usage for component not yet available
         "type": "podSchedulingPolicy",
         "customSpec": {
           "engine": {
@@ -342,6 +346,8 @@ Returns a specific preset with:
 GET /clusters/{cluster}/presets/{name}?namespace={namespace}
 ```
 
+**Response:** Preset object with pre-filled namespace-scoped fields.
+
 ```json
 {
   "apiVersion": "core.openeverest.io/v1alpha1",
@@ -374,7 +380,7 @@ GET /clusters/{cluster}/presets/{name}?namespace={namespace}
           "monitoringConfigName": "config" // pre-filled from default annotation "openeverest.io/is-default-components-monitoring"
         }
       },
-      "splithorizon": {
+      "splithorizon": { // Example to showcase usage for component not yet available
         "type": "splithorizon",
         "config": {
           "secretRef": {
@@ -385,7 +391,7 @@ GET /clusters/{cluster}/presets/{name}?namespace={namespace}
           "domain": "example.com"
         }
       },
-      "loadbalancer": {
+      "loadbalancer": { // Example to showcase usage for component not yet available
         "type": "loadbalancer",
         "customSpec": {
           "annotations": {
@@ -393,7 +399,7 @@ GET /clusters/{cluster}/presets/{name}?namespace={namespace}
           }
         }
       },
-      "podSchedulingPolicy": {
+      "podSchedulingPolicy": { // Example to showcase usage for component not yet available
         "type": "podSchedulingPolicy",
         "customSpec": {
           "engine": {
@@ -453,7 +459,7 @@ spec:
       customSpec:
         monitoringConfigName: config  # RESOLVED from namespace default
     
-    splithorizon:
+    splithorizon: # Example to showcase usage for component not yet available
       type: splithorizon
       config:
         secretRef:
@@ -461,13 +467,13 @@ spec:
       customSpec:
         domain: example.com
     
-    loadbalancer:
+    loadbalancer: # Example to showcase usage for component not yet available
       type: loadbalancer
       customSpec:
         annotations:
           annot-1: "value-1"
 
-    podSchedulingPolicy:
+    podSchedulingPolicy: # Example to showcase usage for component not yet available
       type: podSchedulingPolicy
       customSpec:
         engine:
@@ -476,8 +482,6 @@ spec:
               - podAffinityTerm:
                   topologyKey: kubernetes.io/hostname
                 weight: 1
-        proxy:
-        configServer:
     
   topology:
     type: replicaSet
