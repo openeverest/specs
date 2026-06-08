@@ -33,7 +33,10 @@ Currently, deploying an Instance requires users to manually configure each compo
 
 ### Preset CR
 
-Preset is a cluster-scoped configuration template mirroring Instance spec. It is not a namespace-scoped resource to avoid users from defining Presets for each namespace. Naturally, Preset does not contain namespace-scoped resources and those fields are left empty. Preset API provides ways to pre-fill empty namespace-scoped fields (StorageClass, MonitoringConfig, Secrets) when fetched with namespace parameter. Instances are created by copying values from Preset and contain annotation references to the originating Preset. 
+Preset is a cluster-scoped configuration template mirroring Instance spec. It is not a namespace-scoped resource to avoid users from defining Presets for each namespace.
+Preset does not contain namespace-scoped resources and namespace-scoped fields are left empty.
+Preset API provides ways to pre-fill empty namespace-scoped fields (MonitoringConfig, Secrets) when fetched with namespace parameter.
+Instances are created by copying values from Preset and contain annotation references to the originating Preset.
 
 **Example Preset CR:**
 
@@ -49,6 +52,7 @@ spec:
   
   components:
     engine:
+      type: mongod
       replicas: 3
       resources:
         limits:
@@ -56,10 +60,38 @@ spec:
           memory: 4Gi
       storage:
         size: 25Gi
-        storageClass: ""  # Empty - resolved from cluster default
+        storageClass: "local-path"
+    
     monitoring:
+      type: pmm
       customSpec:
-        monitoringConfigName: ""  # Empty - resolved from namespace default once namespace is supplied
+        monitoringConfigName: "" # Namespace-scoped MonitoringConfig is empty - resolve from namespace default with annotation "openeverest.io/is-default-components-monitoring"
+    
+    splithorizon:
+      type: splithorizon
+      config:
+        secretRef:
+          name: ""  # Namespace-scoped secret is empty - resolve from namespace default with annotation "openeverest.io/is-default-components-splithorizon"
+      customSpec:
+        domain: example.com
+    
+    loadbalancer:
+      type: loadbalancer
+      customSpec:
+        annotations:
+          annot-1: "value-1"
+    
+    podSchedulingPolicy:
+      type: podSchedulingPolicy
+      customSpec:
+        engine:
+          podAntiAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+              - podAffinityTerm:
+                  topologyKey: kubernetes.io/hostname
+                weight: 1
+        proxy:
+        configServer:
     
   topology:
     type: replicaSet
@@ -69,39 +101,242 @@ spec:
 
 #### Default Resource Pre-filling
 
-When fetching a Preset via API with a namespace parameter, empty fields are pre-filled using annotation-based defaults from that namespace/cluster. This is the approach used for Kubernetes `PVC` to discover `StorageClass` by looking for annotation `storageclass.kubernetes.io/is-default-class: "true"`. If more than one `StorageClass` is set default, the most recently created `StorageClass` is selected.
+When fetching a Preset via API with a namespace parameter, namespace-scoped fields are pre-filled using annotation-based defaults from that namespace. If more than one default is set, the most recently created is selected.
+This is the same approach used for Kubernetes `PVC` to discover `StorageClass` by looking for annotation `storageclass.kubernetes.io/is-default-class: "true"`.
 
 Preset pre-filling determines which resource to look for by the field name:
-- Field `storageClass`, `storageClassRef`, `storageClassName` → Look for `storageclass.kubernetes.io` `StorageClass` resource
 - Field `monitoringConfig`, `monitoringConfigRef`, `monitoringConfigName` → Look for `monitoring.openeverest.io/v1alpha1` `MonitoringConfig` CRD
 - Field `secret`, `secretRef`, `secretName` → Look for `Secret` resource
-- Field `configMap`, `configMapRef`, `configMapName` → Look for `ConfigMap` resource
 
-While default annotation is sufficient for CRs, secrets and configMaps require additional information to determine which field they are used by. Instance CR may reference multiple secrets and configMaps. For Kubernetes resource `StorageClass`, the annotation set by Kubernetes is used. For OpenEverest CRs, `openeverest.io/is-default: "true"` is used.
+Instance may contain references to secrets such as Split Horizon Certificates.
+The secret annotation requires additional information to determine which field they are used by.
+The annotation uses `openeverest.io/is-default-components-{component-name}` format. The default annotation for secret used by `spec.components.splithorizon` is `openeverest.io/is-default-components-splithorizon: "true"`.
 
-- `StorageClass` → `storageclass.kubernetes.io/is-default-class: "true"`
-- `MonitoringConfig` → `openeverest.io/is-default: "true"`
+- `MonitoringConfig` → `openeverest.io/is-default-components-monitoring: "true"`
+- `Secret` (for splithorizon) → `openeverest.io/is-default-components-splithorizon: "true"`
 
-For secrets and configMaps, additional path information is included in the annotation using `openeverest.io/is-default-{field-path}` format. The default annotation for the field `spec.components.splithorizon.customSpec.tls.secretName` is `openeverest.io/is-default-components-splithorizon-customspec-tls: "true"`.
+**Example: Annotating default**
 
-The annotation creation is done using CLI: 
+```bash
+kubectl annotate Secret <secret-name> \
+  openeverest.io/is-default-components-splithorizon="true" \
+  --overwrite
+```
+
+Or using a CR:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: splithorizon-tls
+  namespace: prod
+  annotations:
+    openeverest.io/is-default-components-splithorizon: "true"
+type: Opaque
+data:
+  ca.key: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQpN...
+  ca.crt: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURGRENDQWZ5Z0F3SUJBZ0lVWTlLTWtlTC82RVhQaitWTjQ...
+```
+
+### Fetching Presets via API
+
+#### API Endpoints
 
 ```
-kubectl annotate MonitoringConfig <monitoring-config-name> openeverest.io/is-default="true" --overwrite
+GET /clusters/{cluster}/presets                           # List all presets
+GET /clusters/{cluster}/presets?provider={provider}       # Filter by provider
+GET /clusters/{cluster}/presets/{name}                    # Get specific preset
+GET /clusters/{cluster}/presets/{name}?namespace={ns}     # Get preset with namespace defaults pre-filled
 ```
 
-#### Fetching Presets via API
+#### 1. List All Presets
+
+Returns all installed presets with:
+- Namespace-scoped fields empty (e.g., `monitoringConfigName` → "")
 
 ```
 GET /clusters/{cluster}/presets
-GET /clusters/{cluster}/presets?provider={provider}
-GET /clusters/{cluster}/presets/{name}
-GET /clusters/{cluster}/presets/{name}?namespace={namespace}
 ```
 
-Presets are fetched through a RESTful API that pre-fills namespace/cluster defaults and prepares Instance configuration for the UI.
+```json
+[{
+  "apiVersion": "core.openeverest.io/v1alpha1",
+  "kind": "Preset",
+  "metadata": {
+    "name": "mongodb-production",
+    "annotations": {
+      "openeverest.io/preset": "mongodb-production"
+    }
+  },
+  "spec": {
+    "provider": "percona-server-mongodb",
+    "components": {
+      "engine": {
+        "replicas": 3,
+        "resources": {
+          "limits": {
+            "cpu": "1",
+            "memory": "4Gi"
+          }
+        },
+        "storage": {
+          "size": "25Gi",
+          "storageClass": "local-path"
+        }
+      },
+      "monitoring": {
+        "type": "pmm",
+        "customSpec": {
+          "monitoringConfigName": "" // empty when namespace is unknown
+        }
+      },
+      "splithorizon": {
+        "type": "splithorizon",
+        "config": {
+          "secretRef": {
+            "name": ""  // empty when namespace is unknown
+          }
+        },
+        "customSpec": {
+          "domain": "example.com"
+        }
+      },
+      "loadbalancer": {
+        "type": "loadbalancer",
+        "customSpec": {
+          "annotations": {
+            "annot-1": "value-1"
+          }
+        }
+      },
+      "podSchedulingPolicy": {
+        "type": "podSchedulingPolicy",
+        "customSpec": {
+          "engine": {
+            "podAntiAffinity": {
+              "preferredDuringSchedulingIgnoredDuringExecution": [
+                {
+                  "podAffinityTerm": {
+                    "topologyKey": "kubernetes.io/hostname"
+                  },
+                  "weight": 1
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "topology": {
+      "type": "replicaSet"
+    },
+    "version": "8.0.12"
+  }
+}]
+```
 
-When `namespace` query parameter is provided, the API returns the Preset CR with namespace/cluster defaults pre-filled:
+**Response:** Array of preset objects with cluster defaults resolved.
+
+#### 2. Filter by Provider
+
+Returns presets for a specific provider.
+
+```
+GET /clusters/{cluster}/presets?provider=percona-server-mongodb
+```
+
+**Response:** Same as above, filtered by provider.
+
+#### 3. Get Specific Preset
+
+Returns a specific preset with:
+- Namespace-scoped fields empty (e.g., `monitoringConfigName` → "")
+
+```json
+{
+  "apiVersion": "core.openeverest.io/v1alpha1",
+  "kind": "Preset",
+  "metadata": {
+    "name": "mongodb-production",
+    "annotations": {
+      "openeverest.io/preset": "mongodb-production"
+    }
+  },
+  "spec": {
+    "provider": "percona-server-mongodb",
+    "components": {
+      "engine": {
+        "replicas": 3,
+        "resources": {
+          "limits": {
+            "cpu": "1",
+            "memory": "4Gi"
+          }
+        },
+        "storage": {
+          "size": "25Gi",
+          "storageClass": "local-path"
+        }
+      },
+      "monitoring": {
+        "type": "pmm",
+        "customSpec": {
+          "monitoringConfigName": "" // empty when namespace is unknown
+        }
+      },
+      "splithorizon": {
+        "type": "splithorizon",
+        "config": {
+          "secretRef": {
+            "name": ""  // empty when namespace is unknown
+          }
+        },
+        "customSpec": {
+          "domain": "example.com"
+        }
+      },
+      "loadbalancer": {
+        "type": "loadbalancer",
+        "customSpec": {
+          "annotations": {
+            "annot-1": "value-1"
+          }
+        }
+      },
+      "podSchedulingPolicy": {
+        "type": "podSchedulingPolicy",
+        "customSpec": {
+          "engine": {
+            "podAntiAffinity": {
+              "preferredDuringSchedulingIgnoredDuringExecution": [
+                {
+                  "podAffinityTerm": {
+                    "topologyKey": "kubernetes.io/hostname"
+                  },
+                  "weight": 1
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "topology": {
+      "type": "replicaSet"
+    },
+    "version": "8.0.12"
+  }
+}
+```
+
+#### 4. Get Preset with Namespace Defaults
+
+Presets API has mechanism to pre-fill namespace defaults.
+When `namespace` query parameter is provided, the API returns the Preset CR with namespace defaults pre-filled.
+
+Returns a specific preset with:
+- Namespace-scoped fields resolved (e.g., `monitoringConfigName` → "config")
 
 ```
 GET /clusters/{cluster}/presets/{name}?namespace={namespace}
@@ -131,11 +366,48 @@ GET /clusters/{cluster}/presets/{name}?namespace={namespace}
         "storage": {
           "size": "25Gi",
           "storageClass": "local-path"
-        },
+        }
       },
       "monitoring": {
+        "type": "pmm",
         "customSpec": {
-          "monitoringConfigName": "config"
+          "monitoringConfigName": "config" // pre-filled from default annotation "openeverest.io/is-default-components-monitoring"
+        }
+      },
+      "splithorizon": {
+        "type": "splithorizon",
+        "config": {
+          "secretRef": {
+            "name": "splithorizon-tls" // pre-filled from default annotation "openeverest.io/is-default-components-splithorizon"
+          }
+        },
+        "customSpec": {
+          "domain": "example.com"
+        }
+      },
+      "loadbalancer": {
+        "type": "loadbalancer",
+        "customSpec": {
+          "annotations": {
+            "annot-1": "value-1"
+          }
+        }
+      },
+      "podSchedulingPolicy": {
+        "type": "podSchedulingPolicy",
+        "customSpec": {
+          "engine": {
+            "podAntiAffinity": {
+              "preferredDuringSchedulingIgnoredDuringExecution": [
+                {
+                  "podAffinityTerm": {
+                    "topologyKey": "kubernetes.io/hostname"
+                  },
+                  "weight": 1
+                }
+              ]
+            }
+          }
         }
       }
     },
@@ -176,10 +448,36 @@ spec:
           memory: 4Gi       # FROM PRESET
       storage:
         size: 25Gi
-        storageClass: local-path  # RESOLVED from cluster default
+        storageClass: local-path
     monitoring:
       customSpec:
         monitoringConfigName: config  # RESOLVED from namespace default
+    
+    splithorizon:
+      type: splithorizon
+      config:
+        secretRef:
+          name: splithorizon-tls  # RESOLVED from namespace default
+      customSpec:
+        domain: example.com
+    
+    loadbalancer:
+      type: loadbalancer
+      customSpec:
+        annotations:
+          annot-1: "value-1"
+
+    podSchedulingPolicy:
+      type: podSchedulingPolicy
+      customSpec:
+        engine:
+          podAntiAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+              - podAffinityTerm:
+                  topologyKey: kubernetes.io/hostname
+                weight: 1
+        proxy:
+        configServer:
     
   topology:
     type: replicaSet
@@ -193,7 +491,7 @@ The OpenEverest UI fetches available Presets from a provider.
 
 **Phase 1 UI Flow for creating Instance:**
 
-1. **List Presets**: UI fetches available presets for selected provider
+1. **Select field with list of presets**: UI fetches available presets for selected provider
    ```
    GET /clusters/{cluster}/presets?provider=percona-server-mongodb
    ```
