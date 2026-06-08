@@ -142,10 +142,10 @@ data:
 #### API Endpoints
 
 ```
-GET /clusters/{cluster}/presets                           # List all presets
-GET /clusters/{cluster}/presets?provider={provider}       # Filter by provider
-GET /clusters/{cluster}/presets/{name}                    # Get specific preset
-GET /clusters/{cluster}/presets/{name}?namespace={ns}     # Get preset with namespace defaults pre-filled
+GET /clusters/{cluster}/presets                                 # List all presets
+GET /clusters/{cluster}/presets?provider={provider}             # Filter by provider
+GET /clusters/{cluster}/presets/{name}                          # Get specific preset
+GET /clusters/{cluster}/presets/{name}/resolve?namespace={ns}   # Get preset with namespace defaults pre-filled
 ```
 
 #### 1. List All Presets
@@ -343,7 +343,7 @@ Returns a specific preset with:
 - Namespace-scoped fields resolved (e.g., `monitoringConfigName` → "config")
 
 ```
-GET /clusters/{cluster}/presets/{name}?namespace={namespace}
+GET /clusters/{cluster}/presets/{name}/resolve?namespace={ns}
 ```
 
 **Response:** Preset object with pre-filled namespace-scoped fields.
@@ -502,7 +502,7 @@ The OpenEverest UI fetches available Presets from a provider.
 
 2. **User Selects Preset and namespace**: UI fetches preset with defaults pre-filled
    ```
-   GET /clusters/${cluster}/presets/mongodb-production?namespace=prod
+   GET /clusters/${cluster}/presets/mongodb-production/resolve?namespace=prod
    ```
 
 3. **Pre-fill Form**: UI populates Instance creation form with Preset values
