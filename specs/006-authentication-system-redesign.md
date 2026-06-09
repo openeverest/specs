@@ -199,8 +199,10 @@ A new package `pkg/apitoken/` manages the registry, mirroring the existing
 `pkg/kubernetes/accounts.go` patterns.
 
 *   **Backing store:** a new Kubernetes Secret `everest-api-tokens` in the Everest system
-    namespace, holding a YAML map keyed by token ID. (Consistent with `everest-accounts`
-    and `everest-blocklist`.)
+    namespace, with one key per token record (ID as key, serialized record as value). This
+    allows concurrent writes to different records safely and is consistent with the existing
+    `everest-blocklist` Secret pattern.
+
 *   **Token generation:** prefix + 256 bits of CSPRNG randomness, base62-encoded. The
     plaintext is returned to the caller exactly once and never persisted.
 *   **At-rest representation:** only a **SHA-256 hash** of the token is stored. (A fast
@@ -237,6 +239,53 @@ PruneExpired(ctx context.Context) error       // periodic cleanup
 encodes its record ID alongside the secret, e.g. `everest_pat_<id>_<secret>`. The server
 parses the ID, fetches that single record, then constant-time-compares the SHA-256 hash of
 the full presented token. Unknown/expired/hash-mismatch all yield a uniform `401`.
+
+**Storage capacity & limits:**
+
+Both **PATs** and **refresh tokens** are stored in this Secret (`Type: "pat" | "refresh"`).
+They have different accumulation patterns:
+
+- **Refresh tokens** are bounded by active login sessions — one record per active session,
+  deleted and replaced on every token refresh (rotation). At steady state a deployment with
+  100 users each running 2 sessions holds ~200 refresh records. They do not accumulate.
+- **PATs** are created deliberately and live until revoked or expired (90-day default).
+  A user might create 2–5 PATs for different integrations. At 100 users that's ~200–500 PAT
+  records. Non-expiring PATs are the only real accumulation risk.
+
+Kubernetes Secrets have a hard size limit of 1 MB applied to the total sum of all value
+bytes (raw, before base64 encoding). Under Option B, each Secret key holds one serialized
+record. Estimating storage per record:
+
+```
+key:   "pat_550e8400e29b41d4a716446655440000"          # ~36 bytes
+value: name=ci-deployment owner=alice type=pat          # serialized record
+       hash=e3b0c44298fc1c149afbf4c8996fb92427ae...    # 64 bytes
+       createdAt=2026-06-09T15:30:00Z                   # ~25 bytes each
+       expiresAt=2026-09-07T15:30:00Z
+       lastUsedAt=2026-06-09T15:25:00Z
+```
+
+A typical record (key + value) is **~350–400 bytes** (key ~36 bytes, name ~30 bytes avg,
+owner ~10 bytes, type ~5 bytes, hash 64 bytes, three timestamps ~75 bytes, serialization
+overhead ~130 bytes).
+
+**Capacity at realistic scale:**
+
+| Scenario | Refresh tokens | PATs | Total records | Est. size |
+|----------|---------------|------|---------------|-----------|
+| 50 users, 2 sessions each | 100 | 250 | 350 | ~140 KB |
+| 200 users, 2 sessions each | 400 | 1,000 | 1,400 | ~560 KB |
+| 500 users, 2 sessions each | 1,000 | 2,500 | 3,500 | ~1.4 MB ⚠️ |
+
+**Viability window:** the registry is viable for deployments up to ~200 active users with
+typical PAT usage (~5 per user). Beyond that, the 1 MB ceiling is reachable. Recommended
+mitigations:
+
+- Automatic pruning of expired records on every write (`PruneExpired`).
+- Operator warning logged at 70% capacity (~700 records).
+- Admin tooling to list/revoke stale tokens.
+- Discourage non-expiring PATs in documentation.
+- Clear migration path to CRD-backed storage in a later phase (see Open Questions).
 
 ### 4.4 Subject scheme (service-account-ready)
 
@@ -579,6 +628,23 @@ This specification is considered implemented when:
     and heavier. A `0600` config file matches the kubeconfig precedent users already trust.
     **Deferred** as a possible later enhancement.
 
+*   **Token registry storage layout: single-key YAML vs. one key per record.** Two approaches
+    to backing the token registry in a Kubernetes Secret:
+    - **Single key (`tokens.yaml`):** all records serialized as one YAML document under a
+      single Secret key, identical to the `users.yaml` pattern in `everest-accounts`. Simpler
+      to reason about, but every write requires a read-modify-write of the full blob with
+      `resourceVersion`-based optimistic locking. Under high concurrency (many concurrent
+      logins, refreshes, PAT creations), this causes frequent conflicts and API errors.
+    - **One key per record:** each key is the token ID, value is the serialized record.
+      More granular — reads and deletes touch only the affected record. Still bounded by the
+      1 MB total Secret size. Concurrent writes to different records are safe natively.
+
+    **Chosen: one key per record.** The registry is written on every login, refresh, and PAT
+    creation, and pruned periodically. A monolithic single-key approach would experience
+    frequent read-modify-write conflicts under this workload pattern. One-key-per-record also
+    aligns with the existing `everest-blocklist` Secret, which appends one jti per key,
+    establishing consistency across the authentication system.
+
 ## 7. Open Questions
 
 *   **Refresh token rotation policy.** The proposal assumes **rotation-on-use** (revoke old,
@@ -588,9 +654,6 @@ This specification is considered implemented when:
     should the cap be, and should admins be able to override it?
 *   **Admin visibility.** Should administrators be able to list/revoke *other* users' PATs
     (e.g. for offboarding), and through which surface (CLI/API/UI)?
-*   **Registry scalability.** A single Kubernetes Secret is consistent with existing
-    patterns but has practical size limits. At what token volume do we need a CRD-backed or
-    sharded store instead?
 *   **Rate limiting for PATs.** Should PAT-authenticated requests share the existing per-IP
     global rate limiter, or get a separate per-token budget?
 *   **`expiresIn` semantics.** Confirm `0`/omitted handling: omitted → `PATDefaultTTL`,
