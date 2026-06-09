@@ -650,6 +650,12 @@ This specification is considered implemented when:
 *   **Refresh token rotation policy.** The proposal assumes **rotation-on-use** (revoke old,
     mint new on each refresh). Should we additionally implement reuse detection (if a
     revoked refresh token is presented, revoke the whole chain)?
+*   **Refresh token TTL sliding vs. absolute.** On rotation, does the new refresh token get
+    a fresh `SessionRefreshTTL` from now (sliding window — active users never forced to
+    re-login), or does it expire at the same absolute time as the original (fixed window —
+    maximum session lifetime is always `SessionRefreshTTL`)? Sliding is better UX and
+    matches most web apps; fixed is more conservative and ensures even active sessions
+    eventually expire. The current spec does not specify which `Mint` receives.
 *   **PAT constraints.** Assume unique token *name* per owner and a soft per-user cap. What
     should the cap be, and should admins be able to override it?
 *   **Admin visibility.** Should administrators be able to list/revoke *other* users' PATs
