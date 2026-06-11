@@ -159,7 +159,7 @@ graph TD
 
     Registry[(everest-api-tokens Secret<br/>hashed PAT + refresh records)]
     Accounts[(everest-accounts Secret)]
-    JWTKey["`/etc/jwt/id_rsa`"]
+    JWTKey["/etc/jwt/id_rsa"]
 
     Auto -- "Bearer everest_pat_..." --> PATMW
     CLI -- "Bearer <access JWT>" --> JWTMW
