@@ -427,7 +427,7 @@ GET /clusters/{cluster}/presets/{name}/resolve?namespace={ns}
 
 ### Instance CR
 
-Instance CR spec is explicitly defined from Preset CR. The `openeverest.io/preset: {name}` annotation is added for tracking.
+Instance CR spec is explicitly defined from Preset CR. The `openeverest.io/preset: {name}` annotation is used for RBAC check for users who can create Instance from Preset defaults but cannot change from the defaults.
 
 **Example Instance CR:**
 
@@ -511,13 +511,29 @@ The OpenEverest UI fetches available Presets from a provider.
 
 5. **Create Instance**: UI constructs and submits Instance CR
 
+#### Prevent users from modifying defaults on One-click deployment
+
+Some users can deploy Instance with one click, but they are unable to edit Instance from the Preset defaults.
+The new Casbin RBAC permission `deploy` is added for users who can create instances from presets only.
+This is a lower level permission than `create` Instance permission which allows users to define custom instance specs.
+
+Users with `deploy` permissions require the `openeverest.io/preset` annotation before submitting the Instance CR.
+Any deviation from Preset defaults is checked by the server.
+
+**Permission Levels:**
+1. **read** - Can view instances
+2. **deploy (NEW)** - Can create instances from presets only (subset of create)
+3. **create** - Can create any instance (includes deploy)
+4. **update** - Can modify existing instances
+5. **delete** - Can delete instances
+
 ### Phased Rollout
 
 #### 🚀 Phase 1 (Initial Release)
 
 **Goal:** One-click deployment with pre-configured presets
 
-### Validation
+**Validation**
 - The pre-installed Preset CR ships with known-valid values.
 
 **User Stories:**
@@ -541,7 +557,7 @@ Users are able to edit Instances populated from presets.
 Users can create a preset from an Instance.
 It also gives users the ability to manage presets on OpenEverest UI. While UI specific for presets can be integrated into OpenEverest, an alternative is implementing preset management via Generic Plugin.
 
-### Validation
+**Validation**
 - A Preset CR follows the same validation rules as an Instance CR.
 - Namespace-scoped and cluster-scoped fields are left empty and disabled from modifying.
 
