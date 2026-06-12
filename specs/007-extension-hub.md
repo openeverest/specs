@@ -37,6 +37,7 @@ Package managers like Homebrew, Krew (kubectl plugins), and Artifact Hub have de
 * Air-gap-friendly distribution path — all artifacts referenced by OCI digest so they can be mirrored with standard tooling (`crane`, `skopeo`, `oras`).
 * An open submission model that encourages community contributions while surfacing trust signals (verified-publisher badge).
 * A browseable website for extension discovery.
+* Surface a lifecycle maturity signal and a free-form capability matrix so users can evaluate production-readiness and feature coverage of each extension.
 
 **Non-Goals (v1):**
 
@@ -73,6 +74,7 @@ metadata:
   homepage: https://github.com/openeverest/provider-percona-server-mongodb
   sourceRepo: https://github.com/openeverest/provider-percona-server-mongodb
   license: Apache-2.0
+  maturity: stable  # alpha | beta | stable | deprecated (defaults to alpha)
   maintainers:
     - github: "openeverest"
 spec:
@@ -81,6 +83,12 @@ spec:
     supportedEngines: [mongodb]
   compatibility:
     openeverest: ">=2.0.0"
+  capabilities:
+    ha: true
+    ha.topologies: [replicaset, sharded]
+    backups: true
+    pitr: true
+    monitoring.prometheus: true
   artifacts:
     chart:
       defaultChannel: stable
@@ -96,6 +104,8 @@ spec:
 
 Note: `digest` is omitted in Phase 1. It becomes required when Phase 2 (CLI install) ships, since digest pinning is a prerequisite for `helm install` from the CLI.
 
+Phase 1 introduces two optional, additive fields that ship from day one: `metadata.maturity` (lifecycle enum; defaults to `alpha` when omitted) and `spec.capabilities` (free-form annotation map advertising provider/plugin features). Both are surfaced by `everestctl extension list` and `info`. No schema enforcement applies in Phase 1; validation arrives in Phase 2 alongside the digest pinning requirement. The recommended (non-binding) capability vocabulary is published in `docs/CAPABILITIES.md` in the hub repo.
+
 **Two CLI commands** — no installer, no CRD, no UI, no Helm execution:
 
 ```
@@ -109,8 +119,16 @@ Example output of `everestctl extension info percona-server-mongodb`:
 Name:        percona-server-mongodb
 Type:        provider
 Version:     0.7.2 (stable)
+Maturity:    stable
 Compatible:  yes (requires OpenEverest >=2.0.0)
 Homepage:    https://github.com/openeverest/provider-percona-server-mongodb
+
+Capabilities:
+  ha                     true
+  ha.topologies          [replicaset, sharded]
+  backups                true
+  pitr                   true
+  monitoring.prometheus  true
 
 To install, run:
   helm install provider-percona-server-mongodb \
@@ -137,11 +155,11 @@ The Phase 1 formula is a **strict subset** of the full schema. Adding `digest`, 
 
 | Phase | Adds | Formula changes |
 |-------|------|-----------------|
-| **1 — Developer preview** | Hub repo, simplified formula, static index, `list`/`info` CLI | Baseline |
-| **2 — CLI install** | Digest pinning required, `install`/`upgrade`/`uninstall` CLI | `digest` becomes required in `channels` |
+| **1 — Developer preview** | Hub repo, simplified formula, static index, `list`/`info` CLI | Baseline + `metadata.maturity` and `spec.capabilities` introduced as optional fields |
+| **2 — CLI install** | Digest pinning required, `install`/`upgrade`/`uninstall` CLI, `--allow-prerelease` gate for non-stable maturity | `digest` becomes required in `channels`; `maturity` enum validated; `capabilities` shape validated (map of scalars/string arrays) |
 | **3 — Lifecycle** | `InstalledExtension` CRD + reconciler | No formula changes |
-| **4 — UI** | Extensions browser page, in-product install | No formula changes |
-| **5 — Trust** | Verified-publisher automation, healthchecks, federation hooks | `verification` block, `health` field in index |
+| **4 — UI** | Extensions browser page, in-product install, maturity badges, capability filter facets | No formula changes |
+| **5 — Trust** | Verified-publisher automation, healthchecks, federation hooks, optional automated `capabilities` verification | `verification` block, `health` field in index |
 | **6 — Generic plugins / frontend** | OCI frontend artifact, bundle serving | `frontend` artifact block |
 
 ---
@@ -234,6 +252,9 @@ metadata:
   homepage: https://github.com/openeverest/provider-percona-server-mongodb
   sourceRepo: https://github.com/openeverest/provider-percona-server-mongodb
   license: Apache-2.0
+  # Author-declared lifecycle stage. Defaults to `alpha` when omitted.
+  # Orthogonal to channels (release cadence) and to `health` (operational status).
+  maturity: stable  # alpha | beta | stable | deprecated
   maintainers:
     - name: "OpenEverest Team"
       email: "maintainers@openeverest.io"
@@ -266,6 +287,26 @@ spec:
     openeverest: ">=2.0.0 <3.0.0"
     # Minimum Kubernetes version.
     kubernetes: ">=1.27"
+
+  # --- Capability matrix (optional, free-form annotations) ---
+  # Advertises what this provider/plugin supports. Values may be scalar
+  # (string/bool/number) or arrays of strings. Keys are free-form; see
+  # docs/CAPABILITIES.md in the hub repo for the recommended vocabulary.
+  # Dot-namespaced keys are a convention for grouping, not enforced.
+  capabilities:
+    ha: true
+    ha.topologies: [replicaset, sharded]
+    backups: true
+    backups.types: [full, incremental]
+    backups.destinations: [s3, gcs, azure]
+    pitr: true
+    pitr.minRpo: "5m"
+    scaling.vertical: true
+    scaling.horizontalRead: true
+    monitoring.prometheus: true
+    monitoring.pmm: true
+    encryption.atRest: true
+    encryption.inTransit: true
 
   # --- Artifact references ---
   artifacts:
@@ -321,9 +362,11 @@ spec:
 | `metadata.displayName` | Yes | Human-readable, max 64 chars |
 | `metadata.description` | Yes | Max 500 chars |
 | `metadata.license` | Yes | Valid SPDX identifier |
+| `metadata.maturity` | No | One of `alpha`, `beta`, `stable`, `deprecated`. Defaults to `alpha`. Independent of channels (release cadence) and of `health` (operational status). |
 | `metadata.maintainers` | Yes | At least one entry with `github` handle |
 | `spec.provider` or `spec.plugin` | Yes | Exactly one, matching `metadata.type` |
 | `spec.compatibility.openeverest` | Yes | Valid semver range |
+| `spec.capabilities` | No | Free-form `string -> scalar \| string[]` map advertising provider/plugin features. No taxonomy enforced in v1; see `docs/CAPABILITIES.md` for the recommended vocabulary. |
 | `spec.artifacts.chart` | Conditional | Required unless `metadata.type == plugin` AND `spec.plugin.contributes.ui == true` AND all other contributes are false |
 | `spec.artifacts.frontend` | Conditional | Required when `spec.plugin.contributes.ui == true` |
 | `spec.artifacts.*.channels.*.digest` | Yes | SHA-256 OCI manifest digest |
@@ -358,9 +401,22 @@ On every merge to `main`, a GitHub Action regenerates `index/index.json`:
       "icon": "https://hub.openeverest.io/extensions/providers/percona-server-mongodb/logo.svg",
       "verified": true,
       "health": "healthy",
+      "maturity": "stable",
       "compatibility": {
         "openeverest": ">=2.0.0 <3.0.0",
         "kubernetes": ">=1.27"
+      },
+      "capabilities": {
+        "ha": true,
+        "ha.topologies": ["replicaset", "sharded"],
+        "backups": true,
+        "backups.types": ["full", "incremental"],
+        "pitr": true,
+        "pitr.minRpo": "5m",
+        "scaling.vertical": true,
+        "monitoring.prometheus": true,
+        "encryption.atRest": true,
+        "encryption.inTransit": true
       },
       "channels": {
         "chart": {
@@ -384,7 +440,9 @@ On every merge to `main`, a GitHub Action regenerates `index/index.json`:
 Properties:
 - **`catalogId`** — identifies this catalog for federation (multiple sources can coexist in the resolver).
 - **`verified`** — computed from the verified-publisher policy (§4.6).
-- **`health`** — one of `healthy`, `degraded`, `broken`; computed by the healthcheck workflow (§4.7).
+- **`health`** — one of `healthy`, `degraded`, `broken`, `deprecated`; computed by the healthcheck workflow (§4.7).
+- **`maturity`** — author-declared lifecycle stage from the formula (`alpha`, `beta`, `stable`, `deprecated`). Always emitted; the index applies the `alpha` default when the formula omits the field.
+- **`capabilities`** — verbatim copy of `spec.capabilities` from the formula. Emitted only when non-empty.
 - **Signed** — `index.json.sig` is a cosign keyless signature (Sigstore transparency log) so consumers can verify the index hasn't been tampered with.
 
 The index is hosted via **GitHub Pages** at `https://hub.openeverest.io/index.json` (or equivalent custom domain).
@@ -463,6 +521,16 @@ An extension is marked `verified: true` in the index when ALL of the following h
 
 Verification is **computed**, not manually granted. The healthcheck workflow (§4.7) re-evaluates criteria continuously. The badge is revoked automatically when criteria stop holding.
 
+#### Maturity, verification, and health
+
+The hub surfaces three orthogonal trust signals. Keeping them separate avoids overloading any single field and lets each evolve independently:
+
+- **`maturity`** — author-declared lifecycle stage of the extension as a whole (`alpha`, `beta`, `stable`, `deprecated`). Lives in `metadata.maturity`. Independent of channels: a brand-new provider can publish a `stable` channel (latest released bits) while still declaring `maturity: alpha` (early in its lifecycle). The CLI gates non-`stable` installs behind `--allow-prerelease` (§4.9) so users do not accidentally adopt experimental extensions.
+- **`verified`** — computed supply-chain trust signal (identity match between maintainer and OCI namespace, cosign signature present, active maintenance, accessible source repo). Independent of maturity: a `stable` extension that loses its cosign signature drops to `verified: false` without changing its declared maturity.
+- **`health`** — current operational status from the daily healthcheck (`healthy`, `degraded`, `broken`, `deprecated`). Independent of both: a `stable`, `verified: true` extension can still go `health: broken` if its OCI artifacts become unreachable.
+
+A composed "production-ready" derived signal — e.g., `productionReady: true` when `maturity == stable` && `verified == true` && `health == healthy` && a category-appropriate minimum capability set is satisfied — is intentionally deferred. The three signals above are the building blocks; once they stabilise in production, a future spec revision can add the derived badge without changing the formula schema.
+
 #### Federation readiness
 
 The index format carries a `catalogId`. The CLI/UI can register multiple catalog URLs:
@@ -494,7 +562,7 @@ Results are written to the index as `health`:
 | `broken` | OCI refs unreachable — extension cannot be installed |
 
 **Deprecation flow:**
-- After 7 consecutive days of `broken` status → automated PR moves the formula to an `extensions/_deprecated/` directory.
+- After 7 consecutive days of `broken` status → automated PR moves the formula to an `extensions/_deprecated/` directory and sets `metadata.maturity: deprecated` on the formula, keeping the author-declared lifecycle stage in sync with the operational state.
 - Deprecated extensions remain in the index with `health: deprecated` and a `deprecatedAt` timestamp. They are hidden by default in the UI/CLI but can be shown with `--include-deprecated`.
 - Formulas are never deleted from git history — preserves audit trail.
 
@@ -515,13 +583,16 @@ A future spec can flip verification fields to required, enforce signature verifi
 
 ```
 everestctl extension search <query>              # Search by name, keyword, category
-everestctl extension info <name>                 # Show metadata, channels, compatibility
+  --maturity <level>                             # Filter by maturity (alpha|beta|stable|deprecated)
+  --capability <key[=value]>                     # Filter by capability key/value (repeatable)
+everestctl extension info <name>                 # Show metadata, maturity, capabilities, channels, compatibility
 everestctl extension install <name>              # Install from default channel
   --channel <channel>                            # Override channel
   --version <version>                            # Pin specific version within channel
   --values <file>                                # Custom Helm values
   --dry-run                                      # Show what would be installed
-everestctl extension list                        # List installed extensions
+  --allow-prerelease                             # Required to install extensions with maturity alpha or beta
+everestctl extension list                        # List installed extensions; includes Maturity column
 everestctl extension upgrade <name>              # Upgrade to channel head
   --all                                          # Upgrade all installed
 everestctl extension uninstall <name>            # Remove extension and cleanup
@@ -533,12 +604,14 @@ everestctl extension catalog add <url>           # Add a catalog source
 everestctl extension catalog remove <name>       # Remove a catalog source
 ```
 
+Maturity gating: when the resolved extension has `maturity: alpha` or `maturity: beta`, `extension install` refuses to proceed unless `--allow-prerelease` is set, and prints a one-line explanation of what the user is opting into. `maturity: deprecated` extensions install without the flag but emit a stronger warning and require interactive confirmation in TTY mode. `--allow-prerelease` is one flag covering both `alpha` and `beta` — finer-grained gating can be added later if it becomes necessary.
+
 #### UI (Extensions page)
 
-- **Browse** — grid/list view of available extensions with category filters, search, type tabs (Providers / Plugins).
-- **Detail** — extension page showing description, README, channels, version history, verification status, compatibility.
-- **Install** — one-click install with channel selector and optional values override (rendered from `valuesSchema` if available).
-- **Installed** — list of installed extensions with current version, channel, available upgrades, health status.
+- **Browse** — grid/list view of available extensions with category filters, search, type tabs (Providers / Plugins), maturity badge on each card, maturity filter chip (default hides `alpha` and `deprecated`), and capability filter facets auto-populated from observed keys in the index.
+- **Detail** — extension page showing description, README, channels, version history, verification status, compatibility, maturity badge with explanatory tooltip, and a capability matrix table rendered from `capabilities`.
+- **Install** — one-click install with channel selector and optional values override (rendered from `valuesSchema` if available). When the extension's maturity is `alpha`, `beta`, or `deprecated`, the install modal explicitly surfaces this and requires the user to confirm before proceeding.
+- **Installed** — list of installed extensions with current version, channel, available upgrades, maturity, and health status.
 - **Upgrade** — one-click upgrade to channel head with diff preview.
 
 ### 4.10 InstalledExtension CRD
@@ -612,9 +685,10 @@ For high-velocity authors, a **GitHub Action template** is provided that automat
 ### Phase 1 — Developer Preview
 
 * [ ] `openeverest/hub` repository exists with simplified formula files for at least one provider (`percona-server-mongodb`) and a `README.md` describing how to submit an extension.
-* [ ] A GitHub Action regenerates `index.json` on every push to `main` and publishes it via GitHub Pages.
-* [ ] `everestctl extension list` fetches `index.json` and prints a table of available extensions.
-* [ ] `everestctl extension info <name>` prints metadata and the exact copy-paste `helm install` command.
+* [ ] The first published `formula.yaml` includes `metadata.maturity` and a non-empty `spec.capabilities` block.
+* [ ] A GitHub Action regenerates `index.json` on every push to `main` and publishes it via GitHub Pages. The index emits `maturity` (with `alpha` default applied when the formula omits the field) and emits `capabilities` verbatim when non-empty.
+* [ ] `everestctl extension list` fetches `index.json` and prints a table of available extensions, including a `Maturity` column.
+* [ ] `everestctl extension info <name>` prints metadata (including `Maturity`), a `Capabilities` key/value table, and the exact copy-paste `helm install` command.
 * [ ] A developer can discover and manually install a provider end-to-end using only the two CLI commands above.
 
 ### Full Solution
@@ -634,6 +708,10 @@ For high-velocity authors, a **GitHub Action template** is provided that automat
 * [ ] `docs/PUBLISHING.md` written — step-by-step guide for extension authors.
 * [ ] `docs/VERIFIED-PUBLISHER.md` written — criteria and process for earning the badge.
 * [ ] `docs/SUPPLY-CHAIN.md` written — best practices for signing and attestation.
+* [ ] `docs/CAPABILITIES.md` written — recommended (non-binding) capability vocabulary covering at least database, storage, LLM, and observability categories.
+* [ ] `everestctl extension install` enforces `--allow-prerelease` for `alpha`/`beta` maturity and emits a stronger warning for `deprecated`.
+* [ ] `everestctl extension search` supports `--maturity` and `--capability` filters.
+* [ ] UI Extensions page renders maturity badges, maturity filter chip, capability filter facets, and a capability matrix on each extension's detail page.
 * [ ] GitHub Action template provided for automated formula PRs on release.
 
 ## 6. Alternatives Considered
@@ -668,6 +746,12 @@ For high-velocity authors, a **GitHub Action template** is provided that automat
 9. **Private extensions** — enterprises may want internal extensions not published to the public hub. The federation model (`catalog add`) supports this, but should we provide more guidance on running a private hub instance?
 
 10. **Index size at scale** — with hundreds of extensions, `index.json` could grow large. Should we support paginated/filtered index endpoints, or is a single JSON file sufficient for the foreseeable future?
+
+11. **`metadata.maturity` default** — should the field default to `alpha` (opt-in to higher claims, friendly to early-stage authors, current proposal) or be required with no default (forces authors to think about it explicitly at submission time)?
+
+12. **Capability vocabulary promotion** — when should the recommended vocabulary in `docs/CAPABILITIES.md` get promoted to a validated, category-scoped taxonomy? Phase 5 healthcheck-driven verification is the natural moment (e.g., scrape chart for backup CRDs to corroborate `backups: true`).
+
+13. **Maturity downgrade notification** — should maturity downgrades (e.g., `stable` → `beta`) trigger a consumer-facing notification on already-installed extensions via the `InstalledExtension` reconciler? Or is the next-upgrade-attempt warning sufficient?
 
 ## 8. References
 
