@@ -193,6 +193,23 @@ everestctl users delete -n team-alpha app-orders
 
 Implemented as the plugin's CLI contribution (spec 003 §12).
 
+### 4.8 HTTP API
+
+**CRs are the source of truth.** Declarative CRUD on `DatabaseUser` / `DatabaseRole` / `DatabaseGrant` goes through the OpenEverest API's existing Kubernetes-style endpoints (the same path the UI uses for any plugin CR per spec 003 §10.8). The UI's "create user" form is just a `POST` of a `DatabaseUser`; `everestctl users delete` is a `DELETE` of the CR. No separate REST verbs duplicate that path.
+
+The plugin backend, mounted at `/v1/plugins/user-management/*` (spec 003 §10.1), exposes a small **imperative** surface for things that don't fit a CR — actions, queries against live DB state, and host callbacks:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/reconcile` | Host → plugin. Standard stateful-plugin reconcile hook (spec 003 §10.8). Not called by users. |
+| `POST` | `/users/{user}/rotate` | Trigger an immediate password rotation. Returns the new credentials secret ref. |
+| `GET`  | `/users/{user}/credentials` | Reveal credentials (one-shot, audit-logged). RBAC-gated; backs the UI "Reveal" action. |
+| `POST` | `/users/{user}/test-connection` | Open a connection with the minted credentials and report success/failure. Used by the UI after create. |
+| `GET`  | `/clusters/{cluster}/db-users` | List users as the database itself reports them (not the CRs). Backs drift detection in the UI. |
+| `POST` | `/clusters/{cluster}/import` | Adopt a pre-existing DB-side user by creating a matching `DatabaseUser` CR (see Open Question §8.4). |
+
+All requests carry the caller's `X-Everest-User` JWT (spec 003 §10.1); the plugin re-checks the user's permission on the underlying `DatabaseCluster` before acting. The plugin's own service token (spec 003 §10.4) is used only for in-cluster machinery (talking to the database, reading secrets) — never to bypass the requester's RBAC.
+
 ## 5. Definition of Done
 
 * `DatabaseUser`, `DatabaseRole`, `DatabaseGrant` CRDs installed by the plugin via spec 003 §10.8.
