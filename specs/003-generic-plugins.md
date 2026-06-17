@@ -39,7 +39,7 @@ Without an extension model for this class of capability, every such feature must
 | **Backend** | An optional HTTP service that implements custom logic on behalf of the plugin. |
 | **Frontend bundle** | An optional ESM JavaScript module loaded at runtime into the web UI shell. |
 | **Extension point** | A named, typed slot in the host UI or CLI where a plugin registers a contribution. |
-| **PluginInstallation** | A namespace-scoped CR that enables a plugin within a specific namespace and holds per-tenant config. |
+| **InstalledExtension** | A namespace-scoped CR that enables a plugin within a specific namespace and holds per-tenant config. |
 | **Infrastructure plugin** | A generic plugin that creates and manages its own Kubernetes resources (Deployments, Services, ConfigMaps) in response to lifecycle events. Requires `spec.kubePermissions` to declare the additional RBAC it needs beyond the OpenEverest API. |
 | **Stateful plugin** | A generic plugin that declares custom resource schemas in its manifest. The host installs the CRDs, watches instances via a dynamic informer, and routes reconciliation events to the plugin backend over HTTP. The plugin does not run its own operator. |
 | **Plugin CRD** | A `CustomResourceDefinition` declared by a stateful plugin under the `plugins.openeverest.io` API group. Installed, validated, and watched by the host; reconciled by the plugin backend via webhook-style HTTP callbacks. |
@@ -103,7 +103,7 @@ The manifest is a Kubernetes `Plugin` CR (cluster-scoped). It declares:
 Any HTTP service. The host never calls it directly from the browser — all traffic goes through the OpenEverest API proxy. Two hosting modes:
 
 - **In-cluster**: a `Service` name + port in a declared namespace.
-- **External**: an HTTPS URL with credentials stored in a `Secret` referenced by the `PluginInstallation`.
+- **External**: an HTTPS URL with credentials stored in a `Secret` referenced by the `InstalledExtension`.
 
 A backend can operate in one or more **operation modes** (see §10 for the full model):
 
@@ -126,7 +126,7 @@ A container image (can be the same image as the backend) that the plugin exposes
 ### 7.1 `Plugin` (cluster-scoped)
 
 ```yaml
-apiVersion: core.openeverest.io/v1alpha1
+apiVersion: extensions.openeverest.io/v1alpha1
 kind: Plugin
 metadata:
   name: sql-explorer
@@ -235,13 +235,13 @@ spec:
     description: "Interact with SQL Explorer from the terminal."
 ```
 
-### 7.2 `PluginInstallation` (namespace-scoped)
+### 7.2 `InstalledExtension` (namespace-scoped)
 
-Enables a plugin for a specific namespace and holds tenant-specific secrets (e.g., external API keys). Multiple `PluginInstallation` CRs for the same plugin allow per-team configuration.
+Enables a plugin for a specific namespace and holds tenant-specific secrets (e.g., external API keys). Multiple `InstalledExtension` CRs for the same plugin allow per-team configuration.
 
 ```yaml
-apiVersion: core.openeverest.io/v1alpha1
-kind: PluginInstallation
+apiVersion: extensions.openeverest.io/v1alpha1
+kind: InstalledExtension
 metadata:
   name: sql-explorer
   namespace: team-alpha
@@ -461,12 +461,12 @@ A daemon backend has no user session driving it. It runs continuously and typica
 - The audit trail is centralised.
 - The hard "no writes to spec-001 resources" guarantee can be enforced uniformly.
 
-**Lifecycle.** When a `PluginInstallation` is created and the plugin declares `backend.modes.daemon`, the host:
+**Lifecycle.** When a `InstalledExtension` is created and the plugin declares `backend.modes.daemon`, the host:
 
 1. Generates the service token and writes it to the projected `Secret`.
 2. Ensures the backend `Deployment` has at least one replica.
-3. Polls `healthPath` to track liveness; surfaces status on the `PluginInstallation`.
-4. On `PluginInstallation` deletion, scales to zero and revokes the token.
+3. Polls `healthPath` to track liveness; surfaces status on the `InstalledExtension`.
+4. On `InstalledExtension` deletion, scales to zero and revokes the token.
 
 ### 10.5 Event stream
 
@@ -502,15 +502,15 @@ Delivered as Server-Sent Events (SSE). Each event carries the underlying Kuberne
 | `user.logout` | A user session is invalidated. |
 | `plugin.installed` | A `Plugin` CR is created. |
 | `plugin.uninstalled` | A `Plugin` CR is deleted. |
-| `plugin.enabled` | A plugin becomes ready (enabled via `Plugin` CR or `PluginInstallation` created). |
-| `plugin.disabled` | A plugin becomes not-ready (disabled via `Plugin` CR or `PluginInstallation` deleted). |
+| `plugin.enabled` | A plugin becomes ready (enabled via `Plugin` CR or `InstalledExtension` created). |
+| `plugin.disabled` | A plugin becomes not-ready (disabled via `Plugin` CR or `InstalledExtension` deleted). |
 | `namespace.added` | A namespace is registered with OpenEverest. |
 | `namespace.removed` | A namespace is removed from OpenEverest. |
 | `settings.updated` | Platform settings are modified. |
 
 Events are sourced from two mechanisms:
 
-1. **Kubernetes watches** — the event hub watches `DatabaseCluster`, `Backup`, `Restore`, `Instance`, `Plugin`, and `PluginInstallation` CRs. Changes are normalised into the event envelope and broadcast to subscribers.
+1. **Kubernetes watches** — the event hub watches `DatabaseCluster`, `Backup`, `Restore`, `Instance`, `Plugin`, and `InstalledExtension` CRs. Changes are normalised into the event envelope and broadcast to subscribers.
 2. **Direct publish** — API handlers that do not correspond to a watched CR (session create/delete, settings update) call `Hub.Publish()` directly to emit events into the same fan-out pipeline.
 
 **Event envelope.**
@@ -534,7 +534,7 @@ Events are sourced from two mechanisms:
 }
 ```
 
-**Authentication.** The stream is authenticated like any other `/v1` endpoint — a daemon plugin uses its service token (§10.4); a user-facing tool uses the user's session token. The events the client receives are filtered by the token's permissions and (if applicable) the namespaces the plugin is enabled in via `PluginInstallation`.
+**Authentication.** The stream is authenticated like any other `/v1` endpoint — a daemon plugin uses its service token (§10.4); a user-facing tool uses the user's session token. The events the client receives are filtered by the token's permissions and (if applicable) the namespaces the plugin is enabled in via `InstalledExtension`.
 
 **Why pull and not push?** A push model requires the host to track which events have been delivered to which plugin, manage retry queues, and persist state across restarts. By pulling, the plugin owns its cursor and the host stays stateless. This mirrors how Kubernetes itself exposes change streams and how every kube controller already handles restarts.
 
@@ -592,11 +592,11 @@ If any rule matches the denylist, the `Plugin` CR is rejected at admission time 
 
 #### Automatic Role generation
 
-When a `PluginInstallation` is created in a namespace, the host:
+When a `InstalledExtension` is created in a namespace, the host:
 
 1. Creates a namespace-scoped `Role` from the declared `kubePermissions`, named `everest-plugin-<name>`.
 2. Creates a `RoleBinding` binding that `Role` to the plugin's `ServiceAccount`.
-3. On `PluginInstallation` deletion, the `Role` and `RoleBinding` are garbage-collected via `ownerReferences`.
+3. On `InstalledExtension` deletion, the `Role` and `RoleBinding` are garbage-collected via `ownerReferences`.
 
 This ensures the plugin can only manage resources in namespaces where it is installed.
 
@@ -604,7 +604,7 @@ This ensures the plugin can only manage resources in namespaces where it is inst
 
 The following illustrates how an infrastructure plugin would work, using ProxySQL as the canonical example:
 
-1. **Installation.** Admin installs the ProxySQL plugin. The `Plugin` CR declares `kubePermissions` for `apps/deployments` and `core/services,configmaps`. The admin creates a `PluginInstallation` in the target namespace.
+1. **Installation.** Admin installs the ProxySQL plugin. The `Plugin` CR declares `kubePermissions` for `apps/deployments` and `core/services,configmaps`. The admin creates a `InstalledExtension` in the target namespace.
 
 2. **Cluster creation.** User creates a new PXC cluster. In the create-instance wizard, the ProxySQL plugin's `instanceCreateFormSection` renders a "Enable ProxySQL" toggle and configuration fields (exposure mode, resource limits, custom rules).
 
@@ -648,7 +648,7 @@ The host-managed reconciliation model avoids all of this. The plugin author writ
 A new `spec.customResources[]` field on the `Plugin` CR:
 
 ```yaml
-apiVersion: core.openeverest.io/v1alpha1
+apiVersion: extensions.openeverest.io/v1alpha1
 kind: Plugin
 metadata:
   name: presets
@@ -696,7 +696,7 @@ The generated CRD will have:
 - Group: `presets.plugins.openeverest.io`
 - Version: `v1alpha1` (auto-assigned; plugin controls via manifest version)
 - Kind: `Preset`
-- Scope: Namespaced (restricted to namespaces where `PluginInstallation` exists)
+- Scope: Namespaced (restricted to namespaces where `InstalledExtension` exists)
 
 #### Host reconciliation model
 
@@ -734,7 +734,7 @@ If the backend is unreachable, the host retries with exponential backoff and set
 
 #### Namespace scoping
 
-Plugin CRs are only permitted in namespaces where a `PluginInstallation` exists for the declaring plugin. The host rejects (via a validating webhook or informer-level filter) any CR created in a namespace without a matching installation. This prevents tenants from creating plugin CRs in namespaces where the plugin is not enabled.
+Plugin CRs are only permitted in namespaces where a `InstalledExtension` exists for the declaring plugin. The host rejects (via a validating webhook or informer-level filter) any CR created in a namespace without a matching installation. This prevents tenants from creating plugin CRs in namespaces where the plugin is not enabled.
 
 #### Security & validation
 
@@ -759,7 +759,7 @@ Stateful plugins typically combine custom resources with other capabilities:
 #### Example: Presets plugin
 
 1. Admin installs the Presets plugin. The host creates the `Preset` CRD under `presets.plugins.openeverest.io`.
-2. Admin creates `PluginInstallation` in `team-alpha`. Users in that namespace can now create `Preset` CRs.
+2. Admin creates `InstalledExtension` in `team-alpha`. Users in that namespace can now create `Preset` CRs.
 3. A user creates a `Preset` named `production-large` with topology, component sizing, and backup config for their PXC clusters.
 4. The Presets backend receives the `/reconcile` call, validates the Preset content against the Provider schema (via `GET /v1/providers/{name}`), and returns status `{ ready: true }`.
 5. During Instance creation, the Presets plugin's `instanceCreateFormSection` shows a "Select Preset" dropdown. On selection, it fetches the Preset CR via the OpenEverest API and pre-fills the form.
@@ -787,7 +787,7 @@ The host checks this before proxying any request to the plugin backend and befor
 
 Even if a plugin backend attempts to call OpenEverest APIs directly, it can only act under the user identity carried in the JWT, which is bound to that user's existing RBAC policy. A plugin cannot read resources the user cannot read, and cannot mutate resources the user cannot mutate.
 
-For **daemon mode**, the autonomous plugin service token (§10.4) is bound to the declared `spec.permissions` and to the plugin name — it is not a user identity. It cannot be used to assume a user's privileges, and it is unconditionally denied write access to spec-001 resources. The token is rotated automatically and revoked on `PluginInstallation` deletion.
+For **daemon mode**, the autonomous plugin service token (§10.4) is bound to the declared `spec.permissions` and to the plugin name — it is not a user identity. It cannot be used to assume a user's privileges, and it is unconditionally denied write access to spec-001 resources. The token is rotated automatically and revoked on `InstalledExtension` deletion.
 
 ## 12. `everestctl` Integration
 
@@ -812,7 +812,7 @@ Discovery:
 everestctl plugin list                     # shows installed plugins with CLI support
 everestctl plugin install <oci-ref>        # installs a plugin
 everestctl plugin uninstall <name>
-everestctl plugin enable   <name> -n <ns>  # creates PluginInstallation
+everestctl plugin enable   <name> -n <ns>  # creates InstalledExtension
 everestctl plugin disable  <name> -n <ns>
 ```
 
@@ -863,8 +863,8 @@ The `--from-tar` flag pushes images into the in-cluster registry if one is confi
 | In-cluster lateral movement | Plugin backend runs in its own `ServiceAccount` with a minimal `Role` auto-generated from `spec.permissions`. `NetworkPolicy` restricts egress to declared endpoints only. |
 | Supply chain | Manifest must include OCI image digests. Host verifies cosign signatures when `spec.signatureVerification: true` is set on the cluster. |
 | Secrets in manifests | Credentials for external backends are stored exclusively in `Secret` resources, never in the `Plugin` CR itself. |
-| Admin-only install | Creating a `Plugin` CR requires cluster-admin RBAC. Enabling per namespace (`PluginInstallation`) requires namespace admin. Regular users only get `use`. |
-| Daemon token theft | Plugin service token is mounted via a projected `Secret` (short-lived, auto-rotated, default TTL 24 h). Token is bound to plugin name + declared permissions, never a user identity, and revoked on `PluginInstallation` deletion. |
+| Admin-only install | Creating a `Plugin` CR requires cluster-admin RBAC. Enabling per namespace (`InstalledExtension`) requires namespace admin. Regular users only get `use`. |
+| Daemon token theft | Plugin service token is mounted via a projected `Secret` (short-lived, auto-rotated, default TTL 24 h). Token is bound to plugin name + declared permissions, never a user identity, and revoked on `InstalledExtension` deletion. |
 | Forged events | The event stream is delivered over the plugin's authenticated HTTPS connection to OpenEverest — there is no inbound push the plugin needs to validate. |
 | Event-driven privilege escalation | Events are informational only — they do not authorise the plugin to perform any action. Any follow-up API call still goes through normal RBAC checks. |
 | Slow event consumer / DoS on host | Per-connection bounded buffer; slow consumers are dropped and reconnect with `since=`. No unbounded queue grows in the host. |
@@ -892,7 +892,7 @@ graph TB
 
     subgraph Kubernetes
         PluginCR[Plugin CR]
-        PIcr[PluginInstallation CR]
+        PIcr[InstalledExtension CR]
         Secret[Secret\nCredentials]
     end
 
@@ -925,7 +925,7 @@ graph TB
 > The earlier draft of this spec (§7) raised ten open questions. This section records the decisions.
 
 1. **Can generic plugins ship their own Kubernetes CRDs?**
-   Yes, with constraints. Plugins may declare custom resource schemas in their manifest under `spec.customResources[]`. The host generates, installs, and watches the resulting CRDs; reconciliation is handled by the plugin backend via HTTP callbacks (see §10.8). Plugins do **not** run their own operators. All plugin CRDs live under the `<pluginName>.plugins.openeverest.io` API group — plugins cannot declare CRDs in the `core.openeverest.io` group or any other core API group. CRDs for spec 001 Providers remain host-exclusive.
+   Yes, with constraints. Plugins may declare custom resource schemas in their manifest under `spec.customResources[]`. The host generates, installs, and watches the resulting CRDs; reconciliation is handled by the plugin backend via HTTP callbacks (see §10.8). Plugins do **not** run their own operators. All plugin CRDs live under the `<pluginName>.plugins.openeverest.io` API group — plugins cannot declare CRDs in `core.openeverest.io` (Provider/Instance) or `extensions.openeverest.io` (Plugin/InstalledExtension). CRDs for spec 001 Providers remain host-exclusive.
 
 2. **What is the minimal backend surface OpenEverest must expose?**
    The existing v1 API, plus four new additions:
@@ -965,7 +965,7 @@ graph TB
 
 Deliver the minimal complete path for a plugin author to ship a UI page.
 
-- `Plugin` CRD (no `PluginInstallation` yet — cluster-wide enable only).
+- `Plugin` CRD (no `InstalledExtension` yet — cluster-wide enable only).
 - `GET /v1/plugins` discovery endpoint.
 - Dynamic ESM loader in the React shell.
 - `@everest/plugin-sdk` stub: `registerExtension`, `useEverestApi`.
@@ -976,7 +976,7 @@ Deliver the minimal complete path for a plugin author to ship a UI page.
 
 ### Phase 2 — Multi-tenant & access control
 
-- `PluginInstallation` CRD — per-namespace enable/disable + config secret.
+- `InstalledExtension` CRD — per-namespace enable/disable + config secret.
 - `plugin/{name}` resource in Casbin model — per-user `use` grants.
 - In-cluster backend `serviceRef` discovery (DNS resolution, health check).
 - Credentials broker: `GET /v1/databases/{id}/connection-details`.
@@ -987,7 +987,7 @@ Deliver the minimal complete path for a plugin author to ship a UI page.
 Unlocks the metering / billing / audit / external-sync class of plugins.
 
 - Plugin token service — mint, mount, and rotate autonomous service tokens.
-- Daemon mode: host-managed `Deployment` lifecycle, health tracking, status conditions on `PluginInstallation`.
+- Daemon mode: host-managed `Deployment` lifecycle, health tracking, status conditions on `InstalledExtension`.
 - `GET /v1/events` SSE endpoint backed by a kube watch on the relevant CRs (`DatabaseCluster`, `Instance`, `Backup`, `Restore`).
 - Event normaliser: maps kube watch events into the plugin-facing schema (§10.5).
 - SDK helpers for the snapshot-then-watch restart pattern (§10.6).
@@ -997,7 +997,7 @@ Unlocks the metering / billing / audit / external-sync class of plugins.
 ### Phase 4 — Infrastructure plugins & form extension points
 
 - `spec.kubePermissions` declaration and hard-coded denylist validation.
-- Automatic `Role` / `RoleBinding` generation from `kubePermissions` on `PluginInstallation` create; garbage-collection on delete.
+- Automatic `Role` / `RoleBinding` generation from `kubePermissions` on `InstalledExtension` create; garbage-collection on delete.
 - `instanceCreateFormSection` and `instanceEditFormSection` extension points.
 - `POST /v1/plugins/{name}/instance-config` endpoint for plugin config handoff.
 - ProxySQL reference plugin as the canonical infrastructure plugin example.
@@ -1018,7 +1018,7 @@ Unlocks plugins that need persistent, structured, namespace-scoped state without
 - Dynamic CRD generation + installation from declared schemas.
 - Dynamic informer for plugin CRs (unstructured client, namespace-filtered).
 - `POST /v1/plugins/{name}/reconcile` endpoint — host calls plugin backend on CR create/update/delete; backend returns status + requeue.
-- Validating webhook (or informer filter) restricting plugin CRs to namespaces with a matching `PluginInstallation`.
+- Validating webhook (or informer filter) restricting plugin CRs to namespaces with a matching `InstalledExtension`.
 - Denylist: `apiextensions.k8s.io` added to `kubePermissions` denylist; Kind uniqueness enforced across all plugins.
 - Presets reference plugin as the canonical stateful-plugin example.
 - SDK helpers: `usePluginResources(kind)` hook for the frontend, `PluginResourceClient` for the backend.
@@ -1043,7 +1043,7 @@ The host stack is already well-shaped for this work — Echo + oapi-codegen for 
 
 - **HTTP / middleware** ([internal/server/](internal/server/)) — Echo handler chain (`newHandlerChain(valH, rbacH, k8sH)`) is the natural place to drop in the plugin proxy and discovery handler.
 - **Auth / JWT** ([pkg/session/](pkg/session/), [pkg/oidc/](pkg/oidc/)) — already mints and validates JWTs; the plugin token service can reuse the same signing key infrastructure.
-- **CRDs / controllers** ([api/core/v1alpha1/](api/core/v1alpha1/), [internal/controller/](internal/controller/)) — kubebuilder-style; adding `Plugin` and `PluginInstallation` follows the same pattern as existing CRDs.
+- **CRDs / controllers** ([api/extensions/v1alpha1/](api/extensions/v1alpha1/), [internal/controller/](internal/controller/)) — kubebuilder-style; adding `Plugin` and `InstalledExtension` follows the same pattern as existing CRDs.
 - **RBAC** ([pkg/rbac/](pkg/rbac/), [data/rbac/model.conf](data/rbac/model.conf)) — Casbin model already supports glob matching on the resource field. Adding `plugin/{name}` is a constants change plus a few policy lines, no model rewrite.
 - **CLI** ([commands/](commands/)) — Cobra; `everestctl plugin ...` slots in alongside existing subcommand groups like [accounts/](commands/accounts/).
 - **UI build** ([ui/apps/everest/](ui/apps/everest/)) — Vite is ESM-native, dynamic `import()` works out of the box.
@@ -1058,7 +1058,7 @@ The host stack is already well-shaped for this work — Echo + oapi-codegen for 
 
 | Area | New / modified files | Approx. LoC |
 |---|---|---|
-| `Plugin` + `PluginInstallation` CRDs ([api/core/v1alpha1/](api/core/v1alpha1/)) | new | 300–500 |
+| `Plugin` + `InstalledExtension` CRDs ([api/extensions/v1alpha1/](api/extensions/v1alpha1/)) | new | 300–500 |
 | Plugin reconciler ([internal/controller/](internal/controller/)) | new | 400–600 |
 | Plugin proxy + discovery + token service ([internal/server/](internal/server/)) | new | 500–800 |
 | `GET /v1/events` SSE handler + kube-watch normaliser (`internal/server/events.go`) | new | 250–400 |
@@ -1080,7 +1080,7 @@ Dropping the durable event-bus subsystem trims roughly 700–1,100 LoC and a sig
 4. **Dynamic React Router**. Workable but easy to get wrong (history scope, error boundaries, nested routes). **Mitigation**: prototype the `<PluginHost>` wrapper early in Phase 1.
 5. **API backward compatibility**. Once plugins ship, breaking response shapes (including the event envelope in §10.5) breaks plugins. **Mitigation**: lock the plugin-facing subset of `/v1` early (discovery, plugin-context, connection-details, events) and treat it as a stability boundary; version the event envelope explicitly.
 6. **Dynamic informer lifecycle** (Phase 6). Plugin CRDs are installed at runtime; informers must be started/stopped as plugins are installed or removed. A stale informer watching a deleted CRD will error-loop. **Mitigation**: wrap dynamic informers in a manager that tracks CRD existence via a watch on `apiextensions.k8s.io/v1/customresourcedefinitions`; tear down informers when the CRD disappears. Crossplane solves this same problem with `engine.Start()/Stop()` per composite resource.
-7. **Reconcile endpoint reliability** (Phase 6). If the plugin backend is down, CRs pile up in a pending state. **Mitigation**: exponential backoff with jitter; status condition `Reconciling=Unknown, reason=BackendUnreachable`; surface on `PluginInstallation` status. No silent data loss — CRs stay in etcd, the informer retries.
+7. **Reconcile endpoint reliability** (Phase 6). If the plugin backend is down, CRs pile up in a pending state. **Mitigation**: exponential backoff with jitter; status condition `Reconciling=Unknown, reason=BackendUnreachable`; surface on `InstalledExtension` status. No silent data loss — CRs stay in etcd, the informer retries.
 
 ### 18.3 Plugin author developer experience
 
@@ -1090,7 +1090,7 @@ The DX investments below are **as important as the architecture itself** and sho
 
 **P0 — minimum required for any external plugin author to succeed:**
 
-- **`everestctl plugin scaffold <name>`** — generates a working plugin in one command: `manifest.yaml`, a TypeScript frontend stub with the SDK wired up, an optional Go backend stub, a `Makefile`, and a sample `PluginInstallation`. This is the single highest-leverage DX item.
+- **`everestctl plugin scaffold <name>`** — generates a working plugin in one command: `manifest.yaml`, a TypeScript frontend stub with the SDK wired up, an optional Go backend stub, a `Makefile`, and a sample `InstalledExtension`. This is the single highest-leverage DX item.
 - **Plugin SDK with strong types** — every extension point's props are typed in `@everest/plugin-sdk`. Event payloads are typed. The `EverestApi` client is generated from the OpenAPI spec so the client and server types can never drift. Plugin authors never write `any`.
 - **A "Hello World" reference plugin** in the [openeverest/plugin-examples](https://github.com/openeverest/plugin-examples) repo (to be created) covering a UI-only plugin, a daemon plugin, and an event-subscriber plugin. Each example is a working, tested codebase, not a snippet in docs.
 - **A working dev-mode loop**: `everestctl plugin dev` runs the plugin's Vite dev server and patches the host's plugin discovery to point at `http://localhost:3001/main.js`. Hot-reload works in the browser without rebuilding/redeploying anything.
