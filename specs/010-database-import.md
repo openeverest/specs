@@ -1,10 +1,10 @@
-# Data Importer via BackupClass Expansion
+# Database Import via BackupClass Expansion
 
 *   **Status:** Draft
 *   **Authors:** @chilagrow
 *   **Created:** 2026-06-26
-*   **Last Updated:** 2026-06-26
-*   **Related Issues:** [Link to relevant GitHub issues]
+*   **Last Updated:** 2026-06-29
+*   **Related Issues:** https://github.com/openeverest/openeverest/issues/2471
 
 ---
 
@@ -89,6 +89,9 @@ type DataSourceExternal struct {
     
     // Path is the absolute file or directory path within the storage bucket
     Path string `json:"path"`
+    
+    // BackupClassName references the BackupClass that defines the import method
+    BackupClassName string `json:"backupClassName"`
 }
 
 type DataSource struct {
@@ -101,7 +104,6 @@ type RestoreSpec struct {
     InstanceName    string                `json:"instanceName"`
     DataSource      DataSource            `json:"dataSource"`
     Config          *runtime.RawExtension `json:"config,omitempty"`
-    BackupClassName string                `json:"backupClassName,omitempty"` // NEW - required when type=External
 }
 ```
 
@@ -126,27 +128,6 @@ type BackupClassSpec struct {
     Job                 *JobExecution                  `json:"job,omitempty"`
     RestoreJob          *JobExecution                  `json:"restoreJob,omitempty"`
     ImportJob           *JobExecution                  `json:"importJob,omitempty"`    // NEW
-}
-```
-
-#### 4.2.3 Extend JobSpec Payload Contract
-
-**File:** `api/backup/v1alpha1/jobspec/spec.go`
-
-Add source type hint:
-
-```go
-type Spec struct {
-    Instance   InstanceRef            `json:"instance"`
-    Connection *ConnectionDetails     `json:"connection,omitempty"`
-    Storage    *StorageDetails        `json:"storage,omitempty"`
-    PITR       *PITRDetails           `json:"pitr,omitempty"`
-    Config     map[string]any         `json:"config,omitempty"`
-    Source     *SourceDetails         `json:"source,omitempty"` // NEW
-}
-
-type SourceDetails struct {
-    Type string `json:"type"` // "backup" or "external"
 }
 ```
 
@@ -267,12 +248,12 @@ metadata:
   namespace: production
 spec:
   instanceName: my-mongo-cluster
-  backupClassName: psmdb-mongoimport-import
   dataSource:
     type: External
     external:
       storageName: s3-external-data
       path: /imports/users.json
+      backupClassName: psmdb-mongoimport-import
   config:
     collection: users
     database: production
@@ -310,9 +291,6 @@ The Restore controller:
     },
     "path": "/imports/users.json"
   },
-  "source": {
-    "type": "external"
-  },
   "config": {
     "collection": "users",
     "database": "production",
@@ -334,7 +312,7 @@ The RestoreReconciler branches on `dataSource.type`:
 | DataSource.Type | BackupClass Resolution | Job Spec | Storage Resolution |
 |----------------|------------------------|----------|-------------------|
 | `Backup` | Via `Backup.spec.backupClassName` | `restoreJob` | From `Backup.spec.storageName` |
-| `External` | Via `Restore.spec.backupClassName` | `importJob` (fallback to `restoreJob`) | From `DataSourceExternal.storageName` |
+| `External` | Via `DataSourceExternal.backupClassName` | `importJob` (fallback to `restoreJob`) | From `DataSourceExternal.storageName` |
 
 Key reconciler changes:
 - `resolveBackupClass()`: Support direct backupClassName reference for External type
@@ -348,66 +326,33 @@ Key reconciler changes:
 
 - If `dataSource.type == External`:
   - `dataSource.external` is required
-  - `backupClassName` is required
+  - `dataSource.external.backupClassName` is required
   - Referenced BackupClass must have `importJob` defined (or `restoreJob` as fallback)
   - `config` validated against `BackupClass.spec.importConfig.openAPIV3Schema`
 - If `dataSource.type == Backup`:
   - `dataSource.backup` is required
-  - `backupClassName` must be omitted (inferred from Backup CR)
+  - `dataSource.external.backupClassName` must be omitted (inferred from Backup CR)
   - `config` validated against `BackupClass.spec.restoreConfig.openAPIV3Schema`
 
 ## 5. Definition of Done
 
 - [ ] API types updated in `api/backup/v1alpha1/` (restore_types.go, backupclass_types.go, jobspec/spec.go)
-- [ ] CRDs regenerated (`make generate manifests`)
 - [ ] Restore controller supports `DataSourceType.External`
 - [ ] Webhook validation implemented for External data sources
-- [ ] OpenAPI spec updated (`api/openapi/http-api.yaml`)
-- [ ] API handlers support new fields in REST endpoints
 - [ ] UI form refactored to create Restore CRs for imports
 - [ ] Integration tests for External data source imports
-- [ ] Documentation updated with import examples
-- [ ] Migration guide for v1 DataImporter → v2 BackupClass pattern
-- [ ] RBAC cleanup: remove legacy `data-importers` resources
 
 ## 6. Alternatives Considered
 
 ### Alternative 1: Keep Separate DataImporter/DataImportJob CRs
 
-**Pros:**
-- Clear semantic separation between restore and import
-- No changes to existing Restore CR
-
-**Cons:**
-- Duplicate infrastructure (job execution, RBAC, payload contracts, status tracking)
-- API surface bloat with separate RBAC resources
-- Inconsistent user experience between restore and import operations
-- More code to maintain
-
 **Decision:** Rejected. The duplication cost outweighs the semantic clarity benefit.
 
 ### Alternative 2: Extend Backup CR to Support External Sources
 
-**Pros:**
-- Could reuse existing Backup → Restore flow
-
-**Cons:**
-- Conceptually confusing (a Backup that isn't actually a backup)
-- Backup CRs have deletion policies, retention, and lifecycle expectations that don't apply to external references
-- Would require nullable `instanceName` in Backup (breaks current invariants)
-
 **Decision:** Rejected. Using Restore CR with External DataSource is more semantically correct.
 
 ### Alternative 3: Separate Import CR
-
-**Pros:**
-- Dedicated CR for import operations
-- Could have import-specific fields
-
-**Cons:**
-- Yet another CR type to learn and manage
-- Still duplicates controller logic from Restore
-- Doesn't align with "import is a restore from external source" conceptual model
 
 **Decision:** Rejected. Extending Restore is simpler and more consistent.
 
@@ -422,17 +367,7 @@ Key reconciler changes:
 3. **Path validation**: Should we validate that `DataSourceExternal.path` exists before creating the Job?
    - **Recommendation**: No. The job container handles errors. Pre-validation adds complexity and latency.
 
-4. **Import scheduling**: Should we support scheduled imports (like InstanceBackupSchedule)?
-   - **Recommendation**: Out of scope for v1. Can be added later if demand exists.
-
-5. **Multi-file imports**: How to handle imports spanning multiple files?
-   - **Recommendation**: The `path` field can reference a directory. Job container handles iteration.
-
 ## 8. References
 
-- [v1 openeverest-operator DataImporter types](https://github.com/percona/everest-operator/blob/main/api/everest/v1alpha1/dataimporter_types.go)
-- [v1 openeverest-operator DataImportJob types](https://github.com/percona/everest-operator/blob/main/api/everest/v1alpha1/dataimportjob_types.go)
-- [v2 BackupClass design](../proposals/backups-restore-architecture.md)
-- [v2 Backup controller implementation](../../internal/controller/backup/backup_controller.go)
-- [v2 Restore controller implementation](../../internal/controller/backup/restore_controller.go)
-- [JobSpec payload contract](../../api/backup/v1alpha1/jobspec/spec.go)
+- [v1 openeverest-operator DataImporter types](https://github.com/openeverest/openeverest-operator/blob/main/api/everest/v1alpha1/dataimporter_types.go)
+- [v1 openeverest-operator DataImportJob types](https://github.com/openeverest/openeverest-operator/blob/main/api/everest/v1alpha1/dataimportjob_types.go)
