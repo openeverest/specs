@@ -1,16 +1,16 @@
-# Database Import via BackupClass Expansion
+# Database Import via Instance Initialization
 
 *   **Status:** Draft
 *   **Authors:** @chilagrow
 *   **Created:** 2026-06-26
-*   **Last Updated:** 2026-06-29
+*   **Last Updated:** 2026-06-30
 *   **Related Issues:** https://github.com/openeverest/openeverest/issues/2471
 
 ---
 
 ## 1. Summary
 
-Enable data import functionality in OpenEverest v2 by extending the existing BackupClass and Restore CRs to support external data sources. Instead of creating separate DataImporter/DataImportJob CRs (as in v1), treat data imports as "restores from external sources" — reusing the existing backup/restore infrastructure with a new `DataSourceType.External` that references an external storage location.
+Enable data import functionality in OpenEverest v2 by extending the Instance CR to support initial data population from external sources. Instead of creating separate DataImporter/DataImportJob CRs (as in v1), treat data imports as instance initialization operations — allowing users to create a new database Instance with pre-populated data by specifying an external data source during Instance creation.
 
 ## 2. Motivation
 
@@ -27,22 +27,22 @@ This creates:
 
 ### Why Change?
 
-A data import is conceptually a **restore operation** where the source happens to be external storage rather than a managed Backup CR. The v2 BackupClass architecture with `ExecutionMode=Job` already provides:
+A data import is conceptually an **instance initialization operation** where a new instance is created and populated with data from an external source. This is fundamentally different from a restore operation, which applies data to an existing instance. The v2 BackupClass architecture with `ExecutionMode=Job` already provides:
 - Job execution with custom images/commands
 - RBAC permission management
 - Payload secret creation and mounting
 - Status observation and lifecycle management
 - OpenAPI schema validation for configuration
 
-Reusing this infrastructure eliminates duplication and provides a unified experience.
+By extending the Instance CR to support initial data sources, we can reuse this infrastructure while maintaining the correct semantic: **creating a new instance with initial data**.
 
 ## 3. Goals & Non-Goals
 
 **Goals:**
-- Enable data import operations using the existing Restore CR and BackupClass infrastructure
+- Enable data import operations during Instance creation
 - Support multiple import methods per provider (e.g., mongorestore, mongoimport, pg_restore, psql)
-- Reuse BackupStorage CRs for S3 credentials and configuration
-- Maintain compatibility with existing backup/restore workflows
+- Reuse BackupStorage CRs for S3 credentials and endpoint configuration
+- Reuse BackupClass CR infrastructure for import job execution
 - Eliminate the need for separate DataImporter/DataImportJob CRs
 
 **Non-Goals:**
@@ -57,61 +57,122 @@ Reusing this infrastructure eliminates duplication and provides a unified experi
 
 ```mermaid
 graph TD
-    User[User] --> Restore[Create Restore CR]
-    Restore --> DataSource{DataSource.Type?}
-    DataSource -->|Backup| ExistingBackup[Reference Backup CR]
-    DataSource -->|External| ExternalSource[Reference BackupStorage + Path]
-    ExistingBackup --> BackupClass1[BackupClass<br/>restoreJob]
-    ExternalSource --> BackupClass2[BackupClass<br/>importJob]
-    BackupClass1 --> Job1[K8s Job: Restore]
-    BackupClass2 --> Job2[K8s Job: Import]
+    User[User] --> Instance[Create Instance CR]
+    Instance --> Check{dataSource.type = External?}
+    Check -->|No| CreateDB[Create DB Resources]
+    Check -->|Yes| CreateDBImport[Create DB Resources]
+    CreateDB --> EmptyReady[Instance Ready]
+    CreateDBImport --> WaitHealthy[Wait for Instance Healthy]
+    WaitHealthy --> ResolveBC[Resolve BackupClass and Validate Config]
+    ResolveBC --> FetchS3[Fetch S3 Creds from BackupStorage]
+    FetchS3 --> FetchDB[Fetch DB Creds from connectionSecretRef]
+    FetchDB --> PayloadSecret[Create Payload Secret]
+    PayloadSecret --> CreateJob[Create Import Job - phase = Restoring]
+    CreateJob --> JobDone{Job Status?}
+    JobDone -->|Succeeded| DataReady[Instance Ready with Data]
+    JobDone -->|Failed| ImportFailed[Import Failed]
 ```
 
 ### 4.2 API Changes
 
-#### 4.2.1 Extend Restore CR DataSource
+#### 4.2.1 Extend DataSource with External Type and Use in Instance CR
 
-**File:** `api/backup/v1alpha1/restore_types.go`
+**File:** `api/core/v1alpha1/instance_types.go`
 
-Add new DataSourceType and supporting types:
+The existing `InstanceSpec.DataSource` field references `backupv1alpha1.DataSource` which only supports `Backup` type. Instead, define all new types locally and change `InstanceSpec.DataSource` to use a new `InstanceDataSource` type:
+
+```go
+// InstanceDataSourceType identifies the kind of data source for instance seeding.
+// +kubebuilder:validation:Enum=Backup;External
+type InstanceDataSourceType string
+
+const (
+    InstanceDataSourceTypeBackup   InstanceDataSourceType = "Backup"
+    InstanceDataSourceTypeExternal InstanceDataSourceType = "External"  // NEW
+)
+
+// InstanceDataSourceExternal references an external storage location for import.
+type InstanceDataSourceExternal struct {
+    // BackupClassName references the BackupClass that defines the import method
+    BackupClassName string `json:"backupClassName"`
+
+    // StorageName references a BackupStorage CR in the same namespace
+    // that contains S3 credentials and endpoint configuration.
+    StorageName string `json:"storageName"`
+
+    // Path is the absolute file or directory path within the bucket.
+    Path string `json:"path"`
+
+    // Config contains import-specific configuration validated against
+    // BackupClass.spec.importConfig.openAPIV3Schema
+    Config *runtime.RawExtension `json:"config,omitempty"`
+}
+
+// InstanceDataSource defines the source for seeding a new Instance.
+// Replaces the previous backupv1alpha1.DataSource reference on InstanceSpec.
+type InstanceDataSource struct {
+    Type     InstanceDataSourceType        `json:"type"`
+    Backup   *InstanceDataSourceBackup     `json:"backup,omitempty"`
+    External *InstanceDataSourceExternal   `json:"external,omitempty"`  // NEW
+}
+```
+
+> **Note:** `InstanceDataSourceBackup` mirrors the existing `DataSourceBackup` from the backup package but is defined locally to keep all instance seeding types self-contained in `instance_types.go`.
+
+The `InstanceSpec.DataSource` field type changes from `*backupv1alpha1.DataSource` to `*InstanceDataSource`:
+
+```go
+type InstanceSpec struct {
+    // ... existing fields ...
+
+    // DataSource specifies a data source to seed the Instance from on creation.
+    // If set, the instance will be created and then populated with data before
+    // being marked as Ready. Immutable once set.
+    // +optional
+    DataSource *InstanceDataSource `json:"dataSource,omitempty"`
+}
+```
+
+**Status tracking** (also in `api/core/v1alpha1/instance_types.go`):
+
+The existing `ConditionDataSourceReady` condition is reused for the import path. New reasons are added alongside the existing ones:
 
 ```go
 const (
-    DataSourceTypeBackup   DataSourceType = "Backup"
-    DataSourceTypeExternal DataSourceType = "External"  // NEW
+    // Existing reasons (unchanged) ...
+
+    // ReasonDataSourceImporting indicates the import Job has been created and
+    // is currently running. Used when dataSource.type=External.
+    ReasonDataSourceImporting = "Importing"
+
+    // ReasonDataSourceImportFailed indicates the import Job failed terminally.
+    // Used when dataSource.type=External.
+    ReasonDataSourceImportFailed = "ImportFailed"
 )
+```
 
-// DataSourceExternal references an external storage location for import
-type DataSourceExternal struct {
-    // StorageName references a BackupStorage CR in the same namespace
-    // that contains S3 credentials and endpoint configuration
-    StorageName string `json:"storageName"`
-    
-    // Path is the absolute file or directory path within the storage bucket
-    Path string `json:"path"`
-    
-    // BackupClassName references the BackupClass that defines the import method
-    BackupClassName string `json:"backupClassName"`
-}
+One new field is added to `InstanceStatus` to record the import Job name for observability (not covered by conditions):
 
-type DataSource struct {
-    Type     DataSourceType      `json:"type"`
-    Backup   *DataSourceBackup   `json:"backup,omitempty"`
-    External *DataSourceExternal `json:"external,omitempty"`  // NEW
-}
+```go
+type InstanceStatus struct {
+    // ... existing fields (Phase, Version, ConnectionSecretRef, Components, Message, Conditions) ...
 
-type RestoreSpec struct {
-    InstanceName    string                `json:"instanceName"`
-    DataSource      DataSource            `json:"dataSource"`
-    Config          *runtime.RawExtension `json:"config,omitempty"`
+    // ImportJobName is the name of the Kubernetes Job created for the
+    // External dataSource import. Set once the Job is created and cleared
+    // when the import completes or fails. Observers can use this to fetch
+    // Job logs directly.
+    // +optional
+    ImportJobName string `json:"importJobName,omitempty"`
 }
 ```
+
+Progress and failure messages are reported via the standard `Conditions` field using `ConditionDataSourceReady` with the appropriate reason and `Message` field. The `InstancePhase` is set to `InstancePhaseRestoring` while the import Job is running, consistent with how Backup-based seeding is reported.
 
 #### 4.2.2 Extend BackupClass for Import Operations
 
 **File:** `api/backup/v1alpha1/backupclass_types.go`
 
-Add import-specific fields:
+Add import-specific fields (this part remains the same):
 
 ```go
 type BackupClassSpec struct {
@@ -235,112 +296,58 @@ spec:
     bucket: my-data-imports
     region: us-east-1
     endpointURL: https://s3.amazonaws.com
-    credentialsSecretName: aws-creds
+    credentialsSecretName: my-s3-creds  # user-created Secret with AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
 ```
 
-#### Step 2: Create Restore with External DataSource
+#### Step 2: Create Instance with DataSource
 
 ```yaml
-apiVersion: backup.openeverest.io/v1alpha1
-kind: Restore
+apiVersion: instance.openeverest.io/v1alpha1
+kind: Instance
 metadata:
-  name: import-user-data
+  name: my-mongo-cluster
   namespace: production
 spec:
-  instanceName: my-mongo-cluster
+  provider: percona-server-mongodb
+  topology: replica-set
+  resources:
+    cpu: "2"
+    memory: 4Gi
+  storage:
+    size: 50Gi
+    class: standard
+
   dataSource:
     type: External
     external:
+      backupClassName: psmdb-mongoimport-import
       storageName: s3-external-data
       path: /imports/users.json
-      backupClassName: psmdb-mongoimport-import
-  config:
-    collection: users
-    database: production
-    type: json
-    drop: true
+      config:
+        collection: users
+        database: production
+        type: json
+        drop: true
 ```
 
-#### Step 3: Controller Creates Job
+#### Step 3: Controller Creates Instance and Import Job
 
-The Restore controller:
-1. Resolves the `psmdb-mongoimport-import` BackupClass
-2. Validates `config` against `BackupClass.spec.importConfig.openAPIV3Schema`
-3. Fetches S3 credentials from the `s3-external-data` BackupStorage
-4. Creates a payload Secret containing:
-
-```json
-{
-  "instance": {"name": "my-mongo-cluster", "namespace": "production"},
-  "connection": {
-    "type": "mongodb",
-    "provider": "percona-server-mongodb",
-    "host": "my-mongo-cluster.svc",
-    "port": "27017",
-    "username": "admin",
-    "password": "***",
-    "uri": "mongodb://admin:***@my-mongo-cluster.svc:27017"
-  },
-  "storage": {
-    "s3": {
-      "bucket": "my-data-imports",
-      "region": "us-east-1",
-      "endpointURL": "https://s3.amazonaws.com",
-      "accessKeyID": "***",
-      "secretAccessKey": "***"
-    },
-    "path": "/imports/users.json"
-  },
-  "config": {
-    "collection": "users",
-    "database": "production",
-    "type": "json",
-    "drop": true
-  }
-}
-```
-
-5. Creates a Kubernetes Job using `BackupClass.spec.importJob.jobSpec`
-6. Observes Job status → updates Restore.status
-
-### 4.5 Controller Logic
-
-**File:** `internal/controller/backup/restore_controller.go`
-
-The RestoreReconciler branches on `dataSource.type`:
-
-| DataSource.Type | BackupClass Resolution | Job Spec | Storage Resolution |
-|----------------|------------------------|----------|-------------------|
-| `Backup` | Via `Backup.spec.backupClassName` | `restoreJob` | From `Backup.spec.storageName` |
-| `External` | Via `DataSourceExternal.backupClassName` | `importJob` (fallback to `restoreJob`) | From `DataSourceExternal.storageName` |
-
-Key reconciler changes:
-- `resolveBackupClass()`: Support direct backupClassName reference for External type
-- `ensurePayloadSecret()`: Build storage details from BackupStorage instead of Backup
-- `validateConfig()`: Use `BackupClass.spec.importConfig` for External type
-- Job container name: Use `"importer"` instead of `"restorer"` for External type
-
-### 4.6 Validation Rules (Webhook)
-
-**File:** `internal/webhook/backup/restore_webhook.go`
-
-- If `dataSource.type == External`:
-  - `dataSource.external` is required
-  - `dataSource.external.backupClassName` is required
-  - Referenced BackupClass must have `importJob` defined (or `restoreJob` as fallback)
-  - `config` validated against `BackupClass.spec.importConfig.openAPIV3Schema`
-- If `dataSource.type == Backup`:
-  - `dataSource.backup` is required
-  - `dataSource.external.backupClassName` must be omitted (inferred from Backup CR)
-  - `config` validated against `BackupClass.spec.restoreConfig.openAPIV3Schema`
+The Instance controller:
+1. Creates the database instance as normal (StatefulSet, Services, etc.)
+2. Waits for the instance to become healthy
+3. Once healthy, resolves the `psmdb-mongoimport-import` BackupClass from `dataSource.external.backupClassName`
+4. Validates `dataSource.external.config` against `BackupClass.spec.importConfig.openAPIV3Schema`
+5. Fetches S3 credentials from the BackupStorage named by `dataSource.external.storageName`
+6. Reads DB credentials (host, port, username, password) from the Secret named by `instance.status.connectionSecretRef` — populated by the provider once the instance is healthy
+7. Creates a payload Secret containing S3 credentials, DB credentials, and user config.
+8. Creates a Kubernetes Job using `BackupClass.spec.importJob.jobSpec`, with the payload Secret mounted as a volume
+9. Sets Instance status
 
 ## 5. Definition of Done
 
-- [ ] API types updated in `api/backup/v1alpha1/` (restore_types.go, backupclass_types.go, jobspec/spec.go)
-- [ ] Restore controller supports `DataSourceType.External`
-- [ ] Webhook validation implemented for External data sources
-- [ ] UI form refactored to create Restore CRs for imports
-- [ ] Integration tests for External data source imports
+- [ ] Controller supports initial data import workflow
+- [ ] UI form supports creating Instances with initial data import
+- [ ] Integration tests for Instance creation with initial data import
 
 ## 6. Alternatives Considered
 
@@ -348,24 +355,33 @@ Key reconciler changes:
 
 **Decision:** Rejected. The duplication cost outweighs the semantic clarity benefit.
 
-### Alternative 2: Extend Backup CR to Support External Sources
+### Alternative 2: Extend Restore CR's DataSource with External Type
 
-**Decision:** Rejected. Using Restore CR with External DataSource is more semantically correct.
+**Decision:** Rejected. Restore CR semantically implies restoring to an **existing** instance, but database import creates a **new** instance. Modifying `restore_types.go` to add `External` would couple the restore and import concerns. Instead, all new types are self-contained in `instance_types.go`.
 
-### Alternative 3: Separate Import CR
+### Alternative 3: Instance Controller Creates a Restore CR Internally
 
-**Decision:** Rejected. Extending Restore is simpler and more consistent.
+**Decision:** Rejected. While this avoids duplicating execution logic, it creates a Restore CR that the user never requested. This phantom CR:
+- Appears in `kubectl get restores` and confuses operators
+- Creates unclear ownership (can the user delete it? interact with it?)
+- Splits failure diagnosis across two controllers and two status objects
+
+Instead, execution logic is extracted into a shared `pkg/importer` package, keeping the Instance controller as the single owner of the import lifecycle with no hidden side effects.
+
+### Alternative 4: Separate Import CR that creates an Instance
+
+**Decision:** Rejected. Having two ways to create an instance (Instance CR vs Import CR) creates confusion. Better to have one way with optional initial data.
 
 ## 7. Open Questions
 
-1. **Fallback behavior**: If `BackupClass.spec.importJob` is nil, should we fall back to `restoreJob`, or fail validation?
-   - **Recommendation**: Fail validation. Import and restore may have different requirements.
+1. **Import failure behavior**: If the import Job fails, should the Instance be automatically deleted, or should it remain with `importPhase: "Failed"`?
+   - **Recommendation**: Keep the Instance. Deletion is destructive and users may want to inspect logs or retry manually. The failed state provides transparency.
 
-2. **PITR support for imports**: Should `DataSourceExternal` support PITR-style "restore to timestamp"?
-   - **Recommendation**: No. PITR is backup-specific. External sources are static snapshots.
+2. **Import retry mechanism**: Should there be a way to retry a failed import without recreating the entire Instance?
+   - **Recommendation**: Not in v1. Users can delete and recreate. Future enhancement could add a retry annotation or status field.
 
-3. **Path validation**: Should we validate that `DataSourceExternal.path` exists before creating the Job?
-   - **Recommendation**: No. The job container handles errors. Pre-validation adds complexity and latency.
+3. **Import progress reporting**: Should we expose Job pod logs or progress metrics in Instance status?
+   - **Recommendation**: Start with basic phase + message. Enhanced progress tracking can be added later.
 
 ## 8. References
 
