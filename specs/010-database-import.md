@@ -191,6 +191,8 @@ type BackupClassSpec struct {
 }
 ```
 
+`importJob` must be unset when `executionMode` is `ProviderManaged`, consistent with the existing constraint on `job` and `restoreJob`.
+
 ### 4.3 Example: Import Methods
 
 Each import method gets its own BackupClass.
@@ -285,9 +287,100 @@ The Instance controller:
 4. Validates `dataSource.external.config` against `BackupClass.spec.importConfig.openAPIV3Schema`
 5. Fetches S3 credentials from the BackupStorage named by `dataSource.external.storageName`
 6. Reads DB credentials (host, port, username, password) from the Secret named by `instance.status.connectionSecretRef` — populated by the provider once the instance is healthy
-7. Creates a payload Secret containing S3 credentials, DB credentials, and user config.
-8. Creates a Kubernetes Job using `BackupClass.spec.importJob.jobSpec`, with the payload Secret mounted as a volume
-9. Sets Instance status
+7. Creates a payload Secret with key `request.json` containing the normalized import contract (matching the `dataimporterspec.Spec` shape from v1):
+
+```json
+{
+  "source": {
+    "s3": {
+      "bucket": "my-data-imports",
+      "region": "us-east-1",
+      "endpointURL": "https://s3.amazonaws.com",
+      "accessKeyID": "***",
+      "secretKey": "***",
+      "verifyTLS": true,
+      "forcePathStyle": false
+    },
+    "path": "/imports/users.json"
+  },
+  "target": {
+    "databaseClusterRef": {"name": "my-mongo-cluster", "namespace": "production"},
+    "host": "my-mongo-cluster.svc",
+    "port": "27017",
+    "user": "admin",
+    "password": "***",
+    "type": "mongodb"
+  },
+  "config": {
+    "collection": "users",
+    "database": "production",
+    "type": "json",
+    "drop": true
+  }
+}
+```
+
+8. Creates a Kubernetes Job using `BackupClass.spec.importJob.jobSpec`, with the payload Secret mounted as a volume at `/payload/request.json`
+9. Sets `status.importJobName`, `ConditionDataSourceReady=False`, reason=`Importing`, phase=`Restoring`
+10. Observes Job until terminal:
+    - **Succeeded**: sets `ConditionDataSourceReady=True`, reason=`Succeeded`, phase=`Ready`, clears `importJobName`
+    - **Failed**: sets `ConditionDataSourceReady=False`, reason=`ImportFailed`, message=job error, phase=`Failed`
+
+### 4.5 UI Support
+
+The import feature integrates into the existing **create instance wizard** as an optional section.
+
+#### Create Instance Wizard: Data Import Section
+
+A new collapsible optional "Data Import" section is added as a step of the create instance wizard.
+
+1. **Import Method** — a `select` dropdown populated by:
+   ```
+   GET /clusters/{cluster}/backup-classes
+   ```
+   Filtered client-side to only show BackupClasses where:
+   - `spec.importJob` is set
+   - `spec.supportedProviders` includes the selected instance provider
+
+2. **Storage** — a `select` dropdown populated by:
+   ```
+   GET /clusters/{cluster}/namespaces/{namespace}/backup-storages
+   ```
+
+3. **Path** — a free-text input for the file/directory path within the bucket.
+
+4. **Import Config** — dynamic fields rendered from the selected BackupClass's `spec.importConfig.openAPIV3Schema`, using the same JSON schema → form field renderer used for backup/restore config forms. The schema is fetched via:
+   ```
+   GET /clusters/{cluster}/backup-classes/{backupClass}
+   ```
+   Rendering hints can optionally be provided via `BackupClass.spec.uiSchema` under an `import` key, mirroring the `backup` and `restore` keys already used there.
+
+**On submit**, the wizard includes the `dataSource` block in the `POST /clusters/{cluster}/namespaces/{namespace}/instances` request body:
+
+```json
+{
+  "spec": {
+    ...
+    "dataSource": {
+      "type": "External",
+      "external": {
+        "backupClassName": "psmdb-mongorestore-import",
+        "storageName": "s3-external-data",
+        "path": "/imports/dump",
+        "config": { ... }
+      }
+    }
+  }
+}
+```
+
+#### Instance Detail Page: Import Status
+
+While `instance.status.phase == "Restoring"` and `ConditionDataSourceReady` is present with `status=False`, the instance detail page shows an import progress banner with:
+- The reason and message from `ConditionDataSourceReady`
+- A link to Job logs using `status.importJobName` (same pattern as restore job log links)
+
+Once the import completes, the condition flips to `status=True` and the banner is dismissed.
 
 ## 5. Definition of Done
 
