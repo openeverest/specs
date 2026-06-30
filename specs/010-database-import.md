@@ -1,4 +1,4 @@
-# Database Import via Instance Initialization
+# Database Import
 
 *   **Status:** Draft
 *   **Authors:** @chilagrow
@@ -10,7 +10,7 @@
 
 ## 1. Summary
 
-Enable data import functionality in OpenEverest v2 by extending the Instance CR to support initial data population from external sources. Instead of creating separate DataImporter/DataImportJob CRs (as in v1), treat data imports as instance initialization operations — allowing users to create a new database Instance with pre-populated data by specifying an external data source during Instance creation.
+Enable data import functionality in OpenEverest v2 by extending the Instance CR and BackupClass CR to support initial data population from external sources. Instead of creating separate DataImporter/DataImportJob CRs (as in v1), treat data imports as instance initialization operations — allowing users to create a new database Instance with pre-populated data by specifying an external data source during Instance creation.
 
 ## 2. Motivation
 
@@ -27,14 +27,14 @@ This creates:
 
 ### Why Change?
 
-A data import is conceptually an **instance initialization operation** where a new instance is created and populated with data from an external source. This is fundamentally different from a restore operation, which applies data to an existing instance. The v2 BackupClass architecture with `ExecutionMode=Job` already provides:
+A data import is conceptually an **instance initialization operation** where a new instance is created and populated with data from an external source. The v2 BackupClass architecture with `ExecutionMode=Job` already provides:
 - Job execution with custom images/commands
 - RBAC permission management
 - Payload secret creation and mounting
 - Status observation and lifecycle management
 - OpenAPI schema validation for configuration
 
-By extending the Instance CR to support initial data sources, we can reuse this infrastructure while maintaining the correct semantic: **creating a new instance with initial data**.
+By extending the Instance CR and BackupClass CR to support initial data sources, we can reuse this infrastructure while maintaining the correct semantic: creating a new instance with initial data.
 
 ## 3. Goals & Non-Goals
 
@@ -46,7 +46,6 @@ By extending the Instance CR to support initial data sources, we can reuse this 
 - Eliminate the need for separate DataImporter/DataImportJob CRs
 
 **Non-Goals:**
-- Replacing existing ProviderManaged backup/restore functionality
 - Supporting non-S3 storage types in the initial implementation (future: Azure, GCS)
 - Automatic schema detection or data transformation during import
 - Bi-directional sync or continuous data replication
@@ -192,11 +191,16 @@ type BackupClassSpec struct {
 }
 ```
 
-### 4.3 Example: Multiple Import Methods
+### 4.3 Example: Import Methods
 
-Each import method gets its own BackupClass:
+Each import method gets its own BackupClass.
 
-#### BackupClass 1: mongorestore (BSON dumps)
+The default `importer` binary will be shipped inside the `provider-percona-server-mongodb` provider image,
+as it was in v1.
+It reads the mounted `request.json` payload, creates a `PerconaServerMongoDBRestore` CR against the Kubernetes API, and waits for the restore to reach a terminal state before exiting.
+See https://github.com/openeverest/openeverest-operator/blob/main/internal/data-importer/cmd/psmdb/import.go.
+
+#### BackupClass:
 
 ```yaml
 apiVersion: backup.openeverest.io/v1alpha1
@@ -204,80 +208,22 @@ kind: BackupClass
 metadata:
   name: psmdb-mongorestore-import
 spec:
-  displayName: "MongoDB Restore (mongorestore)"
+  displayName: "MongoDB Import"
   description: "Import BSON dumps created by mongodump"
   supportedProviders: [percona-server-mongodb]
   executionMode: Job
   
   importJob:
     jobSpec:
-      image: percona/percona-server-mongodb:7.0
-      command: ["/usr/bin/mongorestore"]
+      image: percona/provider-percona-server-mongodb:0.1.0
+      command: ["/importer", "psmdb"]
     permissions:
       - apiGroups: [""]
         resources: [secrets]
-        verbs: [get]
-  
-  importConfig:
-    openAPIV3Schema:
-      type: object
-      properties:
-        database:
-          type: string
-          description: "Target database name"
-        drop:
-          type: boolean
-          description: "Drop collections before import"
-        numParallelCollections:
-          type: integer
-          description: "Number of parallel restore threads"
-```
-
-#### BackupClass 2: mongoimport (JSON/CSV files)
-
-```yaml
-apiVersion: backup.openeverest.io/v1alpha1
-kind: BackupClass
-metadata:
-  name: psmdb-mongoimport-import
-spec:
-  displayName: "MongoDB Import (mongoimport)"
-  description: "Import JSON, CSV, or TSV files"
-  supportedProviders: [percona-server-mongodb]
-  executionMode: Job
-  
-  importJob:
-    jobSpec:
-      image: percona/percona-server-mongodb:7.0
-      command: ["/usr/bin/mongoimport"]
-    permissions:
-      - apiGroups: [""]
-        resources: [secrets]
-        verbs: [get]
-  
-  importConfig:
-    openAPIV3Schema:
-      type: object
-      properties:
-        collection:
-          type: string
-          description: "Target collection"
-        database:
-          type: string
-          description: "Target database"
-        file:
-          type: string
-          description: "File name in the source path"
-        type:
-          type: string
-          enum: [json, csv, tsv]
-          description: "Input file format"
-        headerline:
-          type: boolean
-          description: "Use first line as field names (CSV/TSV)"
-        drop:
-          type: boolean
-          description: "Drop collection before import"
+        verbs: [get, create, update, delete]
+      - apiGroups: ["psmdb.percona.com"]
+        resources: [perconaservermongodbrestores]
+        verbs: [get, create, update]
 ```
 
 ### 4.4 Example: End-to-End Import Workflow
@@ -374,16 +320,12 @@ Instead, execution logic is extracted into a shared `pkg/importer` package, keep
 
 ## 7. Open Questions
 
-1. **Import failure behavior**: If the import Job fails, should the Instance be automatically deleted, or should it remain with `importPhase: "Failed"`?
-   - **Recommendation**: Keep the Instance. Deletion is destructive and users may want to inspect logs or retry manually. The failed state provides transparency.
+1. **Import retry mechanism**: Should there be a way to retry a failed import without recreating the entire Instance?
 
-2. **Import retry mechanism**: Should there be a way to retry a failed import without recreating the entire Instance?
-   - **Recommendation**: Not in v1. Users can delete and recreate. Future enhancement could add a retry annotation or status field.
-
-3. **Import progress reporting**: Should we expose Job pod logs or progress metrics in Instance status?
-   - **Recommendation**: Start with basic phase + message. Enhanced progress tracking can be added later.
+2. **Import progress reporting**: Should we expose Job pod logs or progress metrics in Instance status?
 
 ## 8. References
 
 - [v1 openeverest-operator DataImporter types](https://github.com/openeverest/openeverest-operator/blob/main/api/everest/v1alpha1/dataimporter_types.go)
 - [v1 openeverest-operator DataImportJob types](https://github.com/openeverest/openeverest-operator/blob/main/api/everest/v1alpha1/dataimportjob_types.go)
+- [v1 default importer](https://github.com/openeverest/openeverest-operator/blob/main/internal/data-importer/cmd/psmdb/import.go)
