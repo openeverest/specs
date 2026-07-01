@@ -74,24 +74,41 @@ graph TD
 
 ### 4.2 API Changes
 
-#### 4.2.1 Extend DataSource with External Type and Use in Instance CR
+#### 4.2.1 Extend DataSource
 
 **File:** `api/core/v1alpha1/instance_types.go`
 
-The existing `InstanceSpec.DataSource` field references `backupv1alpha1.DataSource` which only supports `Backup` type. Instead, define all new types locally and change `InstanceSpec.DataSource` to use a new `InstanceDataSource` type:
+For the instance initialization use case (creating an instance with pre-populated data), the Instance CR uses `dataSource` field where `*backupv1alpha1.DataSource` is defiend in `restore_types.go`:
 
 ```go
-// InstanceDataSourceType identifies the kind of data source for instance seeding.
+type InstanceSpec struct {
+    // DataSource specifies a data source to seed the Instance from on creation.
+    // If set, the instance will be created and then a Restore operation will
+    // be automatically triggered to populate data before marking the instance as Ready.
+    // Immutable once set.
+    // +optional
+    DataSource *backupv1alpha1.DataSource `json:"dataSource,omitempty"`
+
+    // ... other fields ...
+}
+```
+
+**File:** `api/backup/v1alpha1/restore_types.go`
+
+The existing `RestoreSpec.DataSource` currently only supports `Backup` type via `DataSourceBackup`. Extend `DataSource` to support `External` type:
+
+```go
+// DataSourceType identifies the kind of data source for restore.
 // +kubebuilder:validation:Enum=Backup;External
-type InstanceDataSourceType string
+type DataSourceType string
 
 const (
-    InstanceDataSourceTypeBackup   InstanceDataSourceType = "Backup"
-    InstanceDataSourceTypeExternal InstanceDataSourceType = "External"  // NEW
+    DataSourceTypeBackup   DataSourceType = "Backup"
+    DataSourceTypeExternal DataSourceType = "External"  // NEW
 )
 
-// InstanceDataSourceExternal references an external storage location for import.
-type InstanceDataSourceExternal struct {
+// DataSourceExternal references an external storage location for import.
+type DataSourceExternal struct {
     // BackupClassName references the BackupClass that defines the import method
     BackupClassName string `json:"backupClassName"`
 
@@ -99,73 +116,21 @@ type InstanceDataSourceExternal struct {
     // that contains S3 credentials and endpoint configuration.
     StorageName string `json:"storageName"`
 
-    // Path is the absolute file or directory path within the bucket.
-    Path string `json:"path"`
-
-    // Config contains import-specific configuration validated against
-    // BackupClass.spec.importConfig.openAPIV3Schema
-    Config *runtime.RawExtension `json:"config,omitempty"`
+    // Config contains all import configuration including:
+    // - path: S3 file/directory path
+    // - credentialsSecretName: Secret with database credentials
+    // Validated against BackupClass.spec.importConfig.openAPIV3Schema
+    // +kubebuilder:validation:Required
+    Config *runtime.RawExtension `json:"config"`
 }
 
-// InstanceDataSource defines the source for seeding a new Instance.
-// Replaces the previous backupv1alpha1.DataSource reference on InstanceSpec.
-type InstanceDataSource struct {
-    Type     InstanceDataSourceType        `json:"type"`
-    Backup   *InstanceDataSourceBackup     `json:"backup,omitempty"`
-    External *InstanceDataSourceExternal   `json:"external,omitempty"`  // NEW
+// DataSource defines the source for a Restore operation.
+type DataSource struct {
+    Type     DataSourceType        `json:"type"`
+    Backup   *DataSourceBackup     `json:"backup,omitempty"`
+    External *DataSourceExternal   `json:"external,omitempty"`  // NEW
 }
 ```
-
-> **Note:** `InstanceDataSourceBackup` mirrors the existing `DataSourceBackup` from the backup package but is defined locally to keep all instance seeding types self-contained in `instance_types.go`.
-
-The `InstanceSpec.DataSource` field type changes from `*backupv1alpha1.DataSource` to `*InstanceDataSource`:
-
-```go
-type InstanceSpec struct {
-    // ... existing fields ...
-
-    // DataSource specifies a data source to seed the Instance from on creation.
-    // If set, the instance will be created and then populated with data before
-    // being marked as Ready. Immutable once set.
-    // +optional
-    DataSource *InstanceDataSource `json:"dataSource,omitempty"`
-}
-```
-
-**Status tracking** (also in `api/core/v1alpha1/instance_types.go`):
-
-The existing `ConditionDataSourceReady` condition is reused for the import path. New reasons are added alongside the existing ones:
-
-```go
-const (
-    // Existing reasons (unchanged) ...
-
-    // ReasonDataSourceImporting indicates the import Job has been created and
-    // is currently running. Used when dataSource.type=External.
-    ReasonDataSourceImporting = "Importing"
-
-    // ReasonDataSourceImportFailed indicates the import Job failed terminally.
-    // Used when dataSource.type=External.
-    ReasonDataSourceImportFailed = "ImportFailed"
-)
-```
-
-One new field is added to `InstanceStatus` to record the import Job name for observability (not covered by conditions):
-
-```go
-type InstanceStatus struct {
-    // ... existing fields (Phase, Version, ConnectionSecretRef, Components, Message, Conditions) ...
-
-    // ImportJobName is the name of the Kubernetes Job created for the
-    // External dataSource import. Set once the Job is created and cleared
-    // when the import completes or fails. Observers can use this to fetch
-    // Job logs directly.
-    // +optional
-    ImportJobName string `json:"importJobName,omitempty"`
-}
-```
-
-Progress and failure messages are reported via the standard `Conditions` field using `ConditionDataSourceReady` with the appropriate reason and `Message` field. The `InstancePhase` is set to `InstancePhaseRestoring` while the import Job is running, consistent with how Backup-based seeding is reported.
 
 #### 4.2.2 Extend BackupClass for Import Operations
 
@@ -183,6 +148,7 @@ type BackupClassSpec struct {
     Config              BackupClassConfig              `json:"config,omitempty"`
     RestoreConfig       BackupClassConfig              `json:"restoreConfig,omitempty"`
     ImportConfig        BackupClassConfig              `json:"importConfig,omitempty"`  // NEW
+    ImportSecret        BackupClassConfig              `json:"importSecret,omitempty"` // NEW
     InstanceConstraints BackupClassInstanceConstraints `json:"instanceConstraints,omitempty"`
     UISchema            *runtime.RawExtension          `json:"uiSchema,omitempty"`
     Job                 *JobExecution                  `json:"job,omitempty"`
@@ -192,6 +158,67 @@ type BackupClassSpec struct {
 ```
 
 `importJob` must be unset when `executionMode` is `ProviderManaged`, consistent with the existing constraint on `job` and `restoreJob`.
+
+**How to Define Import Secret Schema:**
+
+Similar to `config` and `restoreConfig`, the `importSecret` is defined in the BackupClass YAML as a reference to a Go type in the provider's `backupclasses/<name>/types.go`:
+
+```yaml
+# backupclasses/psmdb-import/class.yaml
+importSecret: PSMDBImportCredentials
+```
+
+```go
+// backupclasses/psmdb-import/types.go
+package psmdb_import
+
+// PSMDBImportCredentials defines the required Secret keys for PSMDB import operations.
+// The provider-sdk generate command extracts this as an OpenAPI schema.
+type PSMDBImportCredentials struct {
+    // MONGODB_BACKUP_USER is the MongoDB backup user
+    // +kubebuilder:validation:Required
+    MONGODB_BACKUP_USER string `json:"MONGODB_BACKUP_USER"`
+
+    // MONGODB_BACKUP_PASSWORD is the MongoDB backup user password
+    // +kubebuilder:validation:Required
+    // +kubebuilder:validation:Format=password
+    MONGODB_BACKUP_PASSWORD string `json:"MONGODB_BACKUP_PASSWORD"`
+
+    // MONGODB_CLUSTER_ADMIN_USER is the MongoDB cluster admin user
+    // +kubebuilder:validation:Required
+    MONGODB_CLUSTER_ADMIN_USER string `json:"MONGODB_CLUSTER_ADMIN_USER"`
+
+    // MONGODB_CLUSTER_ADMIN_PASSWORD is the MongoDB cluster admin password
+    // +kubebuilder:validation:Required
+    // +kubebuilder:validation:Format=password
+    MONGODB_CLUSTER_ADMIN_PASSWORD string `json:"MONGODB_CLUSTER_ADMIN_PASSWORD"`
+
+    // MONGODB_CLUSTER_MONITOR_USER is the MongoDB cluster monitor user
+    // +kubebuilder:validation:Required
+    MONGODB_CLUSTER_MONITOR_USER string `json:"MONGODB_CLUSTER_MONITOR_USER"`
+
+    // MONGODB_CLUSTER_MONITOR_PASSWORD is the MongoDB cluster monitor password
+    // +kubebuilder:validation:Required
+    // +kubebuilder:validation:Format=password
+    MONGODB_CLUSTER_MONITOR_PASSWORD string `json:"MONGODB_CLUSTER_MONITOR_PASSWORD"`
+
+    // MONGODB_DATABASE_ADMIN_USER is the MongoDB database admin user
+    // +kubebuilder:validation:Required
+    MONGODB_DATABASE_ADMIN_USER string `json:"MONGODB_DATABASE_ADMIN_USER"`
+
+    // MONGODB_DATABASE_ADMIN_PASSWORD is the MongoDB database admin password
+    // +kubebuilder:validation:Required
+    // +kubebuilder:validation:Format=password
+    MONGODB_DATABASE_ADMIN_PASSWORD string `json:"MONGODB_DATABASE_ADMIN_PASSWORD"`
+
+    // MONGODB_USER_ADMIN_PASSWORD is the MongoDB user admin password
+    // +kubebuilder:validation:Required
+    // +kubebuilder:validation:Format=password
+    MONGODB_USER_ADMIN_PASSWORD string `json:"MONGODB_USER_ADMIN_PASSWORD"`
+}
+```
+
+The `provider-sdk generate` command converts this Go type to an OpenAPI v3 schema that gets embedded in the generated BackupClass manifest.
 
 ### 4.3 Example: Import Methods
 
@@ -214,7 +241,68 @@ spec:
   description: "Import BSON dumps created by mongodump"
   supportedProviders: [percona-server-mongodb]
   executionMode: Job
-  
+
+  importConfig:
+    openAPIV3Schema:
+      type: object
+      required:
+        - path
+        - credentialsSecretName
+      properties:
+        path:
+          type: string
+          description: "S3 path to import file/directory. For mongorestore, point to a directory containing BSON dump files. For mongoimport, point to a single JSON/CSV/TSV file."
+        credentialsSecretName:
+          type: string
+          description: "Name of Secret containing database credentials. Required keys defined by BackupClass.spec.importSecret."
+
+  importSecret:
+    openAPIV3Schema:
+      type: object
+      required:
+        - MONGODB_BACKUP_USER
+        - MONGODB_BACKUP_PASSWORD
+        - MONGODB_CLUSTER_ADMIN_USER
+        - MONGODB_CLUSTER_ADMIN_PASSWORD
+        - MONGODB_CLUSTER_MONITOR_USER
+        - MONGODB_CLUSTER_MONITOR_PASSWORD
+        - MONGODB_DATABASE_ADMIN_USER
+        - MONGODB_DATABASE_ADMIN_PASSWORD
+        - MONGODB_USER_ADMIN_PASSWORD
+      properties:
+        MONGODB_BACKUP_USER:
+          type: string
+          description: "MongoDB backup user"
+        MONGODB_BACKUP_PASSWORD:
+          type: string
+          description: "MongoDB backup user password"
+          format: password
+        MONGODB_CLUSTER_ADMIN_USER:
+          type: string
+          description: "MongoDB cluster admin user"
+        MONGODB_CLUSTER_ADMIN_PASSWORD:
+          type: string
+          description: "MongoDB cluster admin password"
+          format: password
+        MONGODB_CLUSTER_MONITOR_USER:
+          type: string
+          description: "MongoDB cluster monitor user"
+        MONGODB_CLUSTER_MONITOR_PASSWORD:
+          type: string
+          description: "MongoDB cluster monitor password"
+          format: password
+        MONGODB_DATABASE_ADMIN_USER:
+          type: string
+          description: "MongoDB database admin user"
+        MONGODB_DATABASE_ADMIN_PASSWORD:
+          type: string
+          description: "MongoDB database admin password"
+          format: password
+        MONGODB_USER_ADMIN_PASSWORD:
+          type: string
+          description: "MongoDB user admin password"
+          format: password
+
   importJob:
     jobSpec:
       image: percona/provider-percona-server-mongodb:0.1.0
@@ -247,7 +335,32 @@ spec:
     credentialsSecretName: my-s3-creds  # user-created Secret with AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
 ```
 
-#### Step 2: Create Instance with DataSource
+#### Step 2: Create Database Credentials Secret
+
+The import job requires database credentials to connect to the Instance. Users must create a Secret containing the necessary credentials:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: my-mongo-cluster-import-creds
+  namespace: production
+type: Opaque
+stringData:
+  MONGODB_BACKUP_USER: "backup"
+  MONGODB_BACKUP_PASSWORD: "<secure-password>"
+  MONGODB_CLUSTER_ADMIN_USER: "clusterAdmin"
+  MONGODB_CLUSTER_ADMIN_PASSWORD: "<secure-password>"
+  MONGODB_CLUSTER_MONITOR_USER: "clusterMonitor"
+  MONGODB_CLUSTER_MONITOR_PASSWORD: "<secure-password>"
+  MONGODB_DATABASE_ADMIN_USER: "databaseAdmin"
+  MONGODB_DATABASE_ADMIN_PASSWORD: "<secure-password>"
+  MONGODB_USER_ADMIN_PASSWORD: "<secure-password>"
+```
+
+> **Note:** The required credential keys are defined by the BackupClass's `spec.importSecret`. For the PSMDB import BackupClass, all MongoDB user credentials listed in the schema must be provided.
+
+#### Step 3: Create Instance with DataSource
 
 ```yaml
 apiVersion: instance.openeverest.io/v1alpha1
@@ -270,24 +383,24 @@ spec:
     external:
       backupClassName: psmdb-mongoimport-import
       storageName: s3-external-data
-      path: /imports/users.json
       config:
-        collection: users
-        database: production
-        type: json
-        drop: true
+        path: /imports/users.json
+        credentialsSecretName: my-mongo-cluster-import-creds
 ```
 
-#### Step 3: Controller Creates Instance and Import Job
+#### Step 4: Controller Creates Instance and Import Job
 
 The Instance controller:
 1. Creates the database instance as normal (StatefulSet, Services, etc.)
 2. Waits for the instance to become healthy
 3. Once healthy, resolves the `psmdb-mongoimport-import` BackupClass from `dataSource.external.backupClassName`
 4. Validates `dataSource.external.config` against `BackupClass.spec.importConfig.openAPIV3Schema`
-5. Fetches S3 credentials from the BackupStorage named by `dataSource.external.storageName`
-6. Reads DB credentials (host, port, username, password) from the Secret named by `instance.status.connectionSecretRef` — populated by the provider once the instance is healthy
-7. Creates a payload Secret with key `request.json` containing the normalized import contract (matching the `dataimporterspec.Spec` shape from v1):
+5. Extracts `path` and `credentialsSecretName` from `dataSource.external.config`
+6. Validates that the Secret named by `config.credentialsSecretName` exists and contains all required keys defined in `BackupClass.spec.importSecret.openAPIV3Schema`
+7. Fetches S3 credentials from the BackupStorage named by `dataSource.external.storageName`
+8. Reads DB connection info (host, port) from `instance.status` — populated by the provider once the instance is healthy
+9. Reads DB credentials from the user-provided Secret named by `config.credentialsSecretName`
+10. Creates a payload Secret with key `request.json` containing the normalized import contract (matching the `dataimporterspec.Spec` shape from v1):
 
 ```json
 {
@@ -307,22 +420,18 @@ The Instance controller:
     "databaseClusterRef": {"name": "my-mongo-cluster", "namespace": "production"},
     "host": "my-mongo-cluster.svc",
     "port": "27017",
-    "user": "admin",
+    "user": "databaseAdmin",
     "password": "***",
     "type": "mongodb"
-  },
-  "config": {
-    "collection": "users",
-    "database": "production",
-    "type": "json",
-    "drop": true
   }
 }
 ```
 
-8. Creates a Kubernetes Job using `BackupClass.spec.importJob.jobSpec`, with the payload Secret mounted as a volume at `/payload/request.json`
-9. Sets `status.importJobName`, `ConditionDataSourceReady=False`, reason=`Importing`, phase=`Restoring`
-10. Observes Job until terminal:
+> **Note:** The `user` and `password` in the payload are extracted from the user-provided Secret referenced in `config.credentialsSecretName`. For PSMDB, `MONGODB_DATABASE_ADMIN_USER` and `MONGODB_DATABASE_ADMIN_PASSWORD` are used.
+
+11. Creates a Kubernetes Job using `BackupClass.spec.importJob.jobSpec`, with the payload Secret mounted as a volume at `/payload/request.json`
+12. Sets `status.importJobName`, `ConditionDataSourceReady=False`, reason=`Importing`, phase=`Restoring`
+13. Observes Job until terminal:
     - **Succeeded**: sets `ConditionDataSourceReady=True`, reason=`Succeeded`, phase=`Ready`, clears `importJobName`
     - **Failed**: sets `ConditionDataSourceReady=False`, reason=`ImportFailed`, message=job error, phase=`Failed`
 
@@ -349,30 +458,71 @@ A new collapsible optional "Data Import" section is added as a step of the creat
 
 3. **Path** — a free-text input for the file/directory path within the bucket.
 
-4. **Import Config** — dynamic fields rendered from the selected BackupClass's `spec.importConfig.openAPIV3Schema`, using the same JSON schema → form field renderer used for backup/restore config forms. The schema is fetched via:
+4. **Database Credentials** — dynamic password fields rendered from the selected BackupClass's `spec.importSecret.openAPIV3Schema`. The schema defines required Secret keys and their types/descriptions. The schema is fetched via:
+   ```
+   GET /clusters/{cluster}/backup-classes/{backupClass}
+   ```
+   For the PSMDB import BackupClass, the schema defines 9 required credential fields (MongoDB users and passwords). The UI renders input fields for each property in the schema, respecting the `format: password` hint to use password input fields.
+
+   These credentials are used to create a Secret `{instance-name}-import-creds` before creating the Instance.
+
+5. **Import Config** — dynamic fields rendered from the selected BackupClass's `spec.importConfig.openAPIV3Schema`, using the same JSON schema → form field renderer used for backup/restore config forms. The schema is fetched via:
    ```
    GET /clusters/{cluster}/backup-classes/{backupClass}
    ```
    Rendering hints can optionally be provided via `BackupClass.spec.uiSchema` under an `import` key, mirroring the `backup` and `restore` keys already used there.
 
-**On submit**, the wizard includes the `dataSource` block in the `POST /clusters/{cluster}/namespaces/{namespace}/instances` request body:
+**On submit**, the wizard:
 
-```json
-{
-  "spec": {
-    ...
-    "dataSource": {
-      "type": "External",
-      "external": {
-        "backupClassName": "psmdb-mongorestore-import",
-        "storageName": "s3-external-data",
-        "path": "/imports/dump",
-        "config": { ... }
-      }
-    }
-  }
-}
-```
+1. Creates a Secret containing the database credentials:
+   ```
+   POST /clusters/{cluster}/namespaces/{namespace}/secrets
+   ```
+   With body:
+   ```json
+   {
+     "metadata": {
+       "name": "{instance-name}-import-creds"
+     },
+     "type": "Opaque",
+     "stringData": {
+       "MONGODB_BACKUP_USER": "...",
+       "MONGODB_BACKUP_PASSWORD": "...",
+       "MONGODB_CLUSTER_ADMIN_USER": "...",
+       "MONGODB_CLUSTER_ADMIN_PASSWORD": "...",
+       "MONGODB_CLUSTER_MONITOR_USER": "...",
+       "MONGODB_CLUSTER_MONITOR_PASSWORD": "...",
+       "MONGODB_DATABASE_ADMIN_USER": "...",
+       "MONGODB_DATABASE_ADMIN_PASSWORD": "...",
+       "MONGODB_USER_ADMIN_PASSWORD": "..."
+     }
+   }
+   ```
+
+2. Creates the Instance with the `dataSource` block:
+   ```
+   POST /clusters/{cluster}/namespaces/{namespace}/instances
+   ```
+   With body:
+   ```json
+   {
+     "spec": {
+       ...
+       "dataSource": {
+         "type": "External",
+         "external": {
+           "backupClassName": "psmdb-mongorestore-import",
+           "storageName": "s3-external-data",
+           "config": {
+             "path": "/imports/dump",
+             "credentialsSecretName": "{instance-name}-import-creds",
+             ...
+           }
+         }
+       }
+     }
+   }
+   ```
 
 #### Instance Detail Page: Import Status
 
