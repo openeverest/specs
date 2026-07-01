@@ -10,7 +10,7 @@
 
 ## 1. Summary
 
-This specification introduces namespace-scoped API endpoints for managing Secrets and ConfigMaps used by Instance components. Resources created through these endpoints are labeled for identification. Providers customize the creation form fields using UI schema definitions.
+This specification introduces namespace-scoped API endpoints for managing Secrets and ConfigMaps used by Instances and its components. Secrets and ConfigMaps created through these endpoints are labeled for identification. Providers customize the creation form fields using UI schema definitions.
 
 ## 2. Motivation
 
@@ -25,17 +25,17 @@ Currently, users must create Secrets and ConfigMaps using `kubectl`, breaking th
 **Goals:**
 - Provide namespace-scoped API endpoints for Secrets and ConfigMaps
 - Support inline creation during Instance creation
-- Allow providers to define UI schema for resource creation forms
+- Allow providers to define UI schema for Secrets and ConfigMaps creation forms
 
 **Non-Goals:**
-- Cross-namespace resource sharing
+- Cross-namespace Secrets and ConfigMaps sharing
 - Secret versioning or audit trails
 
 ## 4. Proposed Solution / Design
 
-### 4.1. Managed Resource Labels
+### 4.1. Managed Secrets and ConfigMaps Labels
 
-Resources created via these endpoints are identified by labels:
+Secrets and ConfigMaps created are identified by labels:
 
 ```yaml
 apiVersion: v1
@@ -46,13 +46,19 @@ metadata:
   labels:
     openeverest.io/managed: "true"                             # Created via OpenEverest API
     openeverest.io/provider: "provider-percona-server-mongodb" # Provider name
-    openeverest.io/component: "splithorizon"                   # Optional: maps to Instance component
+    openeverest.io/category: "component-splithorizon"          # Resource category for filtering
 ```
 
 **Label meanings:**
-- `openeverest.io/managed: "true"` — Resource is managed by OpenEverest
-- `openeverest.io/provider` — Provider that defines this resource type
-- `openeverest.io/component` — Maps to Instance's component (e.g., `splithorizon`, `engine`, `monitoring`)
+- `openeverest.io/managed: "true"` — Secrets and ConfigMaps are managed by OpenEverest
+- `openeverest.io/provider` — Provider that uses Secrets and ConfigMaps type
+- `openeverest.io/category` — Secrets and ConfigMaps category for filtering (e.g., `component-splithorizon`, `component-engine`, `datasource-import`)
+
+Some Secrets and ConfigMaps are used by many instances, such example is SplitHorizon certificates.
+It should not be deleted after the instance is deleted.
+Other Secrets such as database user credentials used for a specific instance should be deleted with instance.
+Provider decides which Secrets and ConfigMaps to set owner reference to an instance.
+New settings is introduced in OpenEverest UI settings to delete ConfigMaps and Settings no longer necessary.
 
 ### 4.2. API Endpoints
 
@@ -61,7 +67,7 @@ metadata:
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/v1/namespaces/{ns}/secrets` | Create secret |
-| GET | `/v1/namespaces/{ns}/secrets` | List secrets (without content) |
+| GET | `/v1/namespaces/{ns}/secrets` | List secrets (only metadata without content) |
 | DELETE | `/v1/namespaces/{ns}/secrets/{name}` | Delete secret |
 
 #### ConfigMaps
@@ -75,33 +81,72 @@ metadata:
 
 #### Create Request
 
+The request body follows Kubernetes Secret/ConfigMap format with OpenEverest-specific labels:
+
 ```json
 {
-  "name": "my-splithorizon-cert",
-  "provider": "psmdb",
-  "component": "splithorizon",
+  "apiVersion": "v1",
+  "kind": "Secret",
+  "metadata": {
+    "name": "my-splithorizon-cert",
+    "namespace": "default",
+    "labels": {
+      "openeverest.io/managed": "true",
+      "openeverest.io/provider": "provider-percona-server-mongodb",
+      "openeverest.io/category": "component-splithorizon"
+    }
+  },
+  "type": "Opaque",
   "data": {
-    "tls.crt": "<base64-or-string>",
-    "tls.key": "<base64-or-string>"
+    "tls.crt": "<base64-encoded>",
+    "tls.key": "<base64-encoded>"
   }
 }
 ```
 
+**For ConfigMaps:**
+```json
+{
+  "apiVersion": "v1",
+  "kind": "ConfigMap",
+  "metadata": {
+    "name": "my-dns-config",
+    "namespace": "default",
+    "labels": {
+      "openeverest.io/managed": "true",
+      "openeverest.io/provider": "provider-percona-server-mongodb",
+      "openeverest.io/category": "component-splithorizon"
+    }
+  },
+  "data": {
+    "zones.yaml": "zone1: example.com\nzone2: example.net"
+  }
+}
+```
+
+**Label examples:**
+- Component secret: `"openeverest.io/category": "component-splithorizon"`
+- Import credential: `"openeverest.io/category": "datasource-import"`
+
 #### Query Parameters (List)
 
 - `provider` — Filter by provider name
-- `component` — Filter by component
+- `category` — Filter by category
 
 ### 4.3. Instance Creation Flow
 
 When configuring a component that requires a Secret or ConfigMap, the UI displays a dropdown populated by calling:
 
 ```
-GET /v1/namespaces/{ns}/secrets?provider={provider}&component={component}
+GET /v1/namespaces/{ns}/secrets?provider={provider}&category={category}
 ```
 
+**Examples:**
+- Split horizon: `GET /v1/namespaces/{ns}/secrets?provider={provider}&category=component-splithorizon`
+- Import datasource: `GET /v1/namespaces/{ns}/secrets?provider={provider}&category=datasource-import`
+
 The dropdown shows:
-- Existing managed secrets matching the provider and component
+- Existing managed secrets matching the provider and category
 - Option to "Create New" which opens the creation form
 
 **Inline Creation Flow:**
@@ -120,18 +165,83 @@ sequenceDiagram
 ```
 
 **Lifecycle:**
-1. UI creates resource via POST
-2. UI creates Instance referencing the resource
-3. On failure: UI deletes the resource
-4. Garbage collect on resources that are not owner referenced to an Instance with TTL
+1. UI creates Secret via POST
+2. UI creates Instance via POST
+3. On failure: UI deletes Secret
 
-### 4.4. Provider UI Schema Definition
+### 4.4. Provider Secret/ConfigMap Definitions
 
-Providers define UI schema for components that reference Secrets/ConfigMaps. The schema includes both:
-1. **Dropdown selector** for choosing existing resources
-2. **"Add New" button** that opens the creation form
+Providers define Secret and ConfigMap types in separate definition files, similar to BackupClass definitions:
 
-#### Component UI Schema with Selector
+#### Definition Structure
+
+```
+definition/
+  secrets/
+    splithorizon-tls/
+      secret.yaml      # Metadata and schema reference
+      ui.yaml          # UI rendering hints
+      types.go         # Go types for schema validation
+  configmaps/
+    custom-mongod/
+      configmap.yaml   # Metadata and schema reference
+      ui.yaml          # UI rendering hints
+      types.go         # Go types for schema validation
+```
+
+#### Secret Definition Example
+
+**secret.yaml:**
+```yaml
+# definition/secrets/splithorizon-tls/secret.yaml
+displayName: "TLS Certificate"
+description: "TLS certificate for split horizon DNS"
+category: component-splithorizon
+
+config:
+  openAPIV3Schema: SplitHorizonTLSConfig
+```
+
+**ui.yaml:**
+```yaml
+# definition/secrets/splithorizon-tls/ui.yaml
+sections:
+  certificate:
+    label: "TLS Certificate"
+    components:
+      tlsCrt:
+        uiType: file # Not supported yet
+        path: "data.tls\\.crt" # path within Secret
+        fieldParams:
+          label: "Certificate"
+          accept: ".crt,.pem" # Optinal not supported yet
+        validation:
+          required: true
+      tlsKey:
+        uiType: file # Not supported yet
+        path: "data.tls\\.key"
+        fieldParams:
+          label: "Private Key" # path within Secret
+          accept: ".key,.pem" # Optinal not supported yet
+        validation:
+          required: true
+```
+
+**types.go:**
+```go
+// definition/secrets/splithorizon-tls/types.go
+package splithorizontls
+
+type SplitHorizonTLSConfig struct {
+    TLSCrt string `json:"tls.crt"`
+    TLSKey string `json:"tls.key"`
+}
+```
+
+#### Component UI Schema Reference
+
+Components reference secret definitions.
+Below is an example, but final UI schema components will change as it may be more practical to have additional UI rather than expand select UI type.
 
 ```yaml
 # definition/components/splithorizon/component.yaml
@@ -141,87 +251,84 @@ ui:
       label: "Split Horizon Configuration"
       components:
         tlsSecret:
-          uiType: secretSelector
+          uiType: select
           path: spec.components.splithorizon.config.secretRef.name
           fieldParams:
             label: "TLS Certificate"
-            resourceType: tls  # Links to resourceDefinitions.secrets[name=tls]
-            createLabel: "+ Add New Certificate"
-            placeholder: "Select existing certificate..."
+            secretDefinition: splithorizon-tls  # New: References definition/secrets/splithorizon-tls
+            createLabel: "+ Add New Certificate" # New
+          dataSource:
+            provider: secret # Fetch from `GET /v1/namespaces/{ns}/secrets?provider={provider}&category=datasource-import`
+            category: component-splithorizon # New
           validation:
             required: true
 ```
 
-**Selector behavior:**
-- Dropdown is populated via `GET /secrets?provider={provider}&component=splithorizon`
-- Shows existing secrets with `resourceType: tls`
-- "Add New" button opens creation modal defined in `resourceDefinitions.secrets[name=tls]`
+**How it works:**
+1. Dropdown populated via `GET /secrets?provider={provider}&category=component-splithorizon`
+2. Shows existing secrets matching the category
+3. "Add New" button opens creation modal rendered from `definition/secrets/splithorizon-tls/ui.yaml`
+4. Schema validation uses `definition/secrets/splithorizon-tls/secret.yaml` config
 
-#### Resource Creation Schema
+### 4.5. Settings
 
-```yaml
-# definition/components/splithorizon/component.yaml
-resourceDefinitions:
-  secrets:
-    - name: tls  # Referenced by resourceType in selector
-      description: "TLS certificate for split horizon DNS"
-      ui:
-        sections:
-          certificate:
-            label: "TLS Certificate"
-            components:
-              tlsCrt:
-                uiType: file
-                path: "data.tls\\.crt"
-                fieldParams:
-                  label: "Certificate"
-                  accept: ".crt,.pem"
-                validation:
-                  required: true
-              tlsKey:
-                uiType: file
-                path: "data.tls\\.key"
-                fieldParams:
-                  label: "Private Key"
-                  accept: ".key,.pem"
-                validation:
-                  required: true
+Under Settings, a dedicated management page allows users to view and manage Secrets and ConfigMaps:
 
-  configmaps:
-    - name: dnsConfig
-      description: "DNS configuration for split horizon"
-      ui:
-        sections:
-          config:
-            label: "DNS Configuration"
-            components:
-              zones:
-                uiType: text
-                path: "data.zones\\.yaml"
-                fieldParams:
-                  label: "Zone Configuration"
-                  multiline: true
-                  minRows: 5
-                validation:
-                  required: true
-```
+**Location:** Settings → Secrets and Settings → ConfigMaps
 
-The `resourceType` field in the selector maps to the `name` field in `resourceDefinitions` to determine which creation form to display.
+**Layout:**
+- **Tabs**: resources are grouped by:
+  1. **Provider** (e.g., "provider-percona-server-mongodb")
+  2. **Category** within each provider (e.g., "component-splithorizon", "datasource-import")
 
-### 4.5. Delete Validation
+**List View (per tab):**
+- Columns:
+  - Name
+  - Provider
+  - Category
+  - Created Date
+- **Expandable Groups**: Click provider to expand/collapse its categories
+- **Actions** (per resource):
+  - **View Metadata**: GET metadata (Secret data is not shown for security)
+  - **Create**: Optional: POST create secrets or configmaps
+  - **Delete**: DELETE resource with validation
 
-- Reject deletion if resource is referenced by an existing Instance
-- User must remove Instance reference first
+**Delete Validation:**
+- Reject deletion if resource is referenced by any existing Instance
+- User must remove Instance references first or delete the Instance
+
+### 4.6. RBAC
+
+Access to Secret and ConfigMap management endpoints uses Casbin RBAC for authorization:
+
+#### Casbin Policy Model
+
+OpenEverest uses Casbin's RBAC with resource-based access control:
+
+#### Casbin Policies
+
+**Actions:**
+- `create` - Create new Secret/ConfigMap
+- `read` - List and view metadata
+- `delete` - Delete Secret/ConfigMap
+
+**Policy Examples:**
+- `p, role:test, secrets, read, prod/*/*` - All secrets in a namespace
+- `p, role:test, secrets, read, prod/ns1/*`  - Secrets in specific namespace
+- `p, role:test, secrets, read, prod/ns1/secret1`  - Specific secret in specific namespace
+- `p, role:test, configmaps, read, prod/*/*` - All configmaps in a namespace
 
 ## 5. Definition of Done
 
-- [ ] API endpoints implemented for Secrets (Create, List, Delete)
-- [ ] API endpoints implemented for ConfigMaps (Create, List, Get, Delete)
-- [ ] Labels applied correctly on resource creation
-- [ ] Provider resource definitions schema in provider-sdk
+- [ ] API endpoints implemented for Secrets (Create, List, Update, Delete)
+- [ ] API endpoints implemented for ConfigMaps (Create, List, Get, Update, Delete)
+- [ ] Labels applied correctly on Secrets and ConfigMaps creation
+- [ ] Management UI in Settings for viewing, updating, and deleting Secrets/ConfigMaps
+- [ ] Delete validation prevents deletion of in-use resources
+- [ ] RBAC roles and permissions configured for Secrets and ConfigMaps
 - [ ] UI renders forms from provider UI schema
 - [ ] PSMDB provider defines resource types for splithorizon component
-- [ ] Integration tests for API
+- [ ] Integration tests for API and RBAC
 
 ## 6. Alternatives Considered
 
@@ -232,7 +339,9 @@ The `resourceType` field in the selector maps to the `name` field in `resourceDe
 ## 7. Open Questions
 
 1. **Secret data in GET:** Should GET return secret data?
-   - Recommendation: No, only metadata (use kubectl for data)
+   - No, only metadata (use kubectl for data)
+2. **Creation of Secrets and ConfigMaps:** Should we allow creation of ConfigMap and Secret in Settings?
+   - No for now, this may be requested later.
 
 ## 8. References
 
