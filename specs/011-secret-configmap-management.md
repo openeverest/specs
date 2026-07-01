@@ -3,8 +3,9 @@
 *   **Status:** Draft
 *   **Authors:** @chilagrow
 *   **Created:** 2026-06-30
-*   **Last Updated:** 2026-06-30
-*   **Related Issues:** [Link to relevant GitHub issue]
+*   **Last Updated:** 2026-07-01
+*   **Related Issues:** https://github.com/openeverest/openeverest/issues/1798, https://github.com/openeverest/openeverest/issues/2471
+
 
 ---
 
@@ -54,12 +55,6 @@ metadata:
 - `openeverest.io/provider` — Provider that uses Secrets and ConfigMaps type
 - `openeverest.io/category` — Secrets and ConfigMaps category for filtering (e.g., `component-splithorizon`, `component-engine`, `datasource-import`)
 
-Some Secrets and ConfigMaps are used by many instances, such example is SplitHorizon certificates.
-It should not be deleted after the instance is deleted.
-Other Secrets such as database user credentials used for a specific instance should be deleted with instance.
-Provider decides which Secrets and ConfigMaps to set owner reference to an instance.
-New settings is introduced in OpenEverest UI settings to delete ConfigMaps and Settings no longer necessary.
-
 ### 4.2. API Endpoints
 
 #### Secrets
@@ -104,26 +99,6 @@ The request body follows Kubernetes Secret/ConfigMap format with OpenEverest-spe
 }
 ```
 
-**For ConfigMaps:**
-```json
-{
-  "apiVersion": "v1",
-  "kind": "ConfigMap",
-  "metadata": {
-    "name": "my-dns-config",
-    "namespace": "default",
-    "labels": {
-      "openeverest.io/managed": "true",
-      "openeverest.io/provider": "provider-percona-server-mongodb",
-      "openeverest.io/category": "component-splithorizon"
-    }
-  },
-  "data": {
-    "zones.yaml": "zone1: example.com\nzone2: example.net"
-  }
-}
-```
-
 **Label examples:**
 - Component secret: `"openeverest.io/category": "component-splithorizon"`
 - Import credential: `"openeverest.io/category": "datasource-import"`
@@ -163,11 +138,6 @@ sequenceDiagram
         UI->>API: DELETE /secrets/{name}
     end
 ```
-
-**Lifecycle:**
-1. UI creates Secret via POST
-2. UI creates Instance via POST
-3. On failure: UI deletes Secret
 
 ### 4.4. Provider Secret/ConfigMap Definitions
 
@@ -241,7 +211,7 @@ type SplitHorizonTLSConfig struct {
 #### Component UI Schema Reference
 
 Components reference secret definitions.
-Below is an example, but final UI schema components will change as it may be more practical to have additional UI rather than expand select UI type.
+Below is an example, but final UI schema components will change as it may be more practical to have additional UI type rather than expand select UI type.
 
 ```yaml
 # definition/components/splithorizon/component.yaml
@@ -272,6 +242,14 @@ ui:
 
 ### 4.5. Settings
 
+**Lifecycle Management:**
+
+Some Secrets and ConfigMaps are shared across multiple Instances (e.g., SplitHorizon TLS certificates) and should persist after individual Instances are deleted. Others are Instance-specific (e.g., database user credentials) and should be deleted when their owning Instance is removed.
+
+Providers control lifecycle behavior by configuring whether to set owner references on Secrets and ConfigMaps. Resources with owner references are automatically garbage-collected when the owning Instance is deleted.
+
+A Settings page is provided in the OpenEverest UI to manage Secrets and ConfigMaps that are no longer needed.
+
 Under Settings, a dedicated management page allows users to view and manage Secrets and ConfigMaps:
 
 **Location:** Settings → Secrets and Settings → ConfigMaps
@@ -281,21 +259,12 @@ Under Settings, a dedicated management page allows users to view and manage Secr
   1. **Provider** (e.g., "provider-percona-server-mongodb")
   2. **Category** within each provider (e.g., "component-splithorizon", "datasource-import")
 
-**List View (per tab):**
-- Columns:
-  - Name
-  - Provider
-  - Category
-  - Created Date
-- **Expandable Groups**: Click provider to expand/collapse its categories
-- **Actions** (per resource):
-  - **View Metadata**: GET metadata (Secret data is not shown for security)
-  - **Create**: Optional: POST create secrets or configmaps
-  - **Delete**: DELETE resource with validation
+The list view displays each item and following actions: 
+- **View**: GET (Secret data is not shown for security)
+- **Delete**: DELETE with validation
 
-**Delete Validation:**
-- Reject deletion if resource is referenced by any existing Instance
-- User must remove Instance references first or delete the Instance
+**Deleting Secrets or ConfigMaps used by Instances:**
+- DELETE request will succeed but it won't be deleted until no Instance is using it
 
 ### 4.6. RBAC
 
@@ -324,7 +293,7 @@ OpenEverest uses Casbin's RBAC with resource-based access control:
 - [ ] API endpoints implemented for ConfigMaps (Create, List, Get, Update, Delete)
 - [ ] Labels applied correctly on Secrets and ConfigMaps creation
 - [ ] Management UI in Settings for viewing, updating, and deleting Secrets/ConfigMaps
-- [ ] Delete validation prevents deletion of in-use resources
+- [ ] Delete prevents deletion of in-use resources
 - [ ] RBAC roles and permissions configured for Secrets and ConfigMaps
 - [ ] UI renders forms from provider UI schema
 - [ ] PSMDB provider defines resource types for splithorizon component
@@ -334,7 +303,7 @@ OpenEverest uses Casbin's RBAC with resource-based access control:
 
 | Alternative | Decision | Reason |
 |-------------|----------|--------|
-| Embed config in Instance spec | Rejected | No reuse across Instances; large specs |
+| Embed secret config in Instance spec | Rejected | No reuse across Instances; large specs |
 
 ## 7. Open Questions
 
@@ -345,5 +314,5 @@ OpenEverest uses Casbin's RBAC with resource-based access control:
 
 ## 8. References
 
-- [Kubernetes Secrets](https://kubernetes.io/docs/concepts/configuration/secret/)
-- [Kubernetes ConfigMaps](https://kubernetes.io/docs/concepts/configuration/configmap/)
+- https://github.com/openeverest/openeverest/issues/1798
+- https://github.com/openeverest/openeverest/issues/2471
