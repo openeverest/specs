@@ -3,7 +3,7 @@
 *   **Status:** Draft
 *   **Authors:** @chilagrow
 *   **Created:** 2026-06-04
-*   **Last Updated:** 2026-06-25
+*   **Last Updated:** 2026-07-07
 *   **Related Issues:** [openeverest/openeverest#1820]
 
 ---
@@ -511,8 +511,8 @@ POST /clusters/{cluster}/instance-presets/from-instance
 ```json
 {
   "name": "mongodb-custom",
-  "sourceInstanceName": "my-mongodb",
-  "sourceInstanceNamespace": "prod"
+  "instanceName": "my-mongodb",
+  "instanceNamespace": "prod"
 }
 ```
 
