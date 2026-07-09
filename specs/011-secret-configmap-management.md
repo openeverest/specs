@@ -138,6 +138,89 @@ sequenceDiagram
     end
 ```
 
+#### Split Horizon Example
+
+For split horizon, the component will require secret such as `my-splithorizon`.
+
+```
+apiVersion: instance.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: my-mongo-cluster
+  namespace: production
+spec:
+  provider: percona-server-mongodb
+  components:
+    engine:
+      ...
+    splithorizon:
+      config:
+        secretRef:
+          name: my-splithorizon
+```
+
+Below is the content of an example of the secret:
+
+```
+apiVersion: v1
+kind: Secret
+metadata:
+  name: my-splithorizon
+  namespace: production
+type: Opaque
+data:
+  tls.crt: "<secure-crt>"
+  tls.key: "<secure-key>"
+```
+
+#### Data Importer Example
+
+For data importer, instance creation flow (or separate flow as currently done in OpenEverest v1) require additional steps to populate necessary secrets.
+The example secret `my-mongo-cluster-import-creds` is used only by this instance.
+
+```
+apiVersion: instance.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: my-mongo-cluster
+  namespace: production
+spec:
+  provider: percona-server-mongodb
+  topology: replica-set
+  components:
+    ...
+
+  dataSource:
+    type: External # NEW
+    external: # NEW
+      backupClassName: psmdb-mongoimport-import
+      storageName: s3-external-data
+      config:
+        path: /imports/users.json
+        credentialsSecretName: my-mongo-cluster-import-creds
+```
+
+Below is the content of an example of the secret:
+
+```
+apiVersion: v1
+kind: Secret
+metadata:
+  name: my-mongo-cluster-import-creds
+  namespace: production
+type: Opaque
+data:
+  MONGODB_BACKUP_USER: "backup"
+  MONGODB_BACKUP_PASSWORD: "<secure-password>"
+  MONGODB_CLUSTER_ADMIN_USER: "clusterAdmin"
+  MONGODB_CLUSTER_ADMIN_PASSWORD: "<secure-password>"
+  MONGODB_CLUSTER_MONITOR_USER: "clusterMonitor"
+  MONGODB_CLUSTER_MONITOR_PASSWORD: "<secure-password>"
+  MONGODB_DATABASE_ADMIN_USER: "databaseAdmin"
+  MONGODB_DATABASE_ADMIN_PASSWORD: "<secure-password>"
+  MONGODB_USER_ADMIN_PASSWORD: "<secure-password>"
+```
+
 ### 4.4. Provider Secret/ConfigMap Definitions
 
 Providers define Secret and ConfigMap types in separate definition files, similar to BackupClass definitions:
@@ -239,58 +322,6 @@ ui:
 2. Shows existing secrets matching the category
 3. "Add New" button opens creation modal rendered from `definition/secrets/splithorizon-tls/ui.yaml`
 4. Schema validation uses `definition/secrets/splithorizon-tls/secret.yaml` config
-
-#### Data Importer Example
-
-For data importer, instance creation flow (or separate flow as currently done in OpenEverest v1) require additional steps to populate necessary secrets.
-The example secret `my-mongo-cluster-import-creds` is used only by this instance.
-
-```
-apiVersion: instance.openeverest.io/v1alpha1
-kind: Instance
-metadata:
-  name: my-mongo-cluster
-  namespace: production
-spec:
-  provider: percona-server-mongodb
-  topology: replica-set
-  resources:
-    cpu: "2"
-    memory: 4Gi
-  storage:
-    size: 50Gi
-    class: standard
-
-  dataSource:
-    type: External # NEW
-    external: # NEW
-      backupClassName: psmdb-mongoimport-import
-      storageName: s3-external-data
-      config:
-        path: /imports/users.json
-        credentialsSecretName: my-mongo-cluster-import-creds
-```
-
-Below is the content of an example of required secret:
-
-```
-apiVersion: v1
-kind: Secret
-metadata:
-  name: my-mongo-cluster-import-creds
-  namespace: production
-type: Opaque
-stringData:
-  MONGODB_BACKUP_USER: "backup"
-  MONGODB_BACKUP_PASSWORD: "<secure-password>"
-  MONGODB_CLUSTER_ADMIN_USER: "clusterAdmin"
-  MONGODB_CLUSTER_ADMIN_PASSWORD: "<secure-password>"
-  MONGODB_CLUSTER_MONITOR_USER: "clusterMonitor"
-  MONGODB_CLUSTER_MONITOR_PASSWORD: "<secure-password>"
-  MONGODB_DATABASE_ADMIN_USER: "databaseAdmin"
-  MONGODB_DATABASE_ADMIN_PASSWORD: "<secure-password>"
-  MONGODB_USER_ADMIN_PASSWORD: "<secure-password>"
-```
 
 ### 4.5. Settings
 
