@@ -3,7 +3,7 @@
 *   **Status:** Draft
 *   **Authors:** @chilagrow
 *   **Created:** 2026-06-30
-*   **Last Updated:** 2026-07-01
+*   **Last Updated:** 2026-07-09
 *   **Related Issues:** https://github.com/openeverest/openeverest/issues/1798, https://github.com/openeverest/openeverest/issues/2471
 
 
@@ -52,7 +52,7 @@ metadata:
 
 **Label meanings:**
 - `openeverest.io/managed: "true"` — Secrets and ConfigMaps are managed by OpenEverest
-- `openeverest.io/provider` — Provider that uses Secrets and ConfigMaps type
+- `openeverest.io/provider` — Provider that uses Secrets and ConfigMaps type (empty for Secrets or ConfigMaps shared across providers)
 - `openeverest.io/category` — Secrets and ConfigMaps category for filtering (e.g., `component-splithorizon`, `component-engine`, `datasource-import`)
 
 ### 4.2. API Endpoints
@@ -61,18 +61,18 @@ metadata:
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/v1/namespaces/{ns}/secrets` | Create secret |
-| GET | `/v1/namespaces/{ns}/secrets` | List secrets (only metadata without content) |
-| DELETE | `/v1/namespaces/{ns}/secrets/{name}` | Delete secret |
+| POST | `/clusters/{cluster}/namespaces/{ns}/secrets` | Create secret |
+| GET | `/clusters/{cluster}/namespaces/{ns}/secrets` | List secrets (only metadata without content) |
+| DELETE | `/clusters/{cluster}/namespaces/{ns}/secrets/{name}` | Delete secret |
 
 #### ConfigMaps
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/v1/namespaces/{ns}/configmaps` | Create configmap |
-| GET | `/v1/namespaces/{ns}/configmaps` | List configmaps |
-| GET | `/v1/namespaces/{ns}/configmaps/{name}` | Get configmap (includes data) |
-| DELETE | `/v1/namespaces/{ns}/configmaps/{name}` | Delete configmap |
+| POST | `/clusters/{cluster}/namespaces/{ns}/configmaps` | Create configmap |
+| GET | `/clusters/{cluster}/namespaces/{ns}/configmaps` | List configmaps |
+| GET | `/clusters/{cluster}/namespaces/{ns}/configmaps/{name}` | Get configmap (includes data) |
+| DELETE | `/clusters/{cluster}1/namespaces/{ns}/configmaps/{name}` | Delete configmap |
 
 #### Create Request
 
@@ -113,12 +113,12 @@ The request body follows Kubernetes Secret/ConfigMap format with OpenEverest-spe
 When configuring a component that requires a Secret or ConfigMap, the UI displays a dropdown populated by calling:
 
 ```
-GET /v1/namespaces/{ns}/secrets?provider={provider}&category={category}
+GET /clusters/{cluster}/namespaces/{ns}/secrets?provider={provider}&category={category}
 ```
 
 **Examples:**
-- Split horizon: `GET /v1/namespaces/{ns}/secrets?provider={provider}&category=component-splithorizon`
-- Import datasource: `GET /v1/namespaces/{ns}/secrets?provider={provider}&category=datasource-import`
+- Split horizon: `GET /clusters/{cluster}/namespaces/{ns}/secrets?provider={provider}&category=component-splithorizon`
+- Import datasource: `GET /clusters/{cluster}/namespaces/{ns}/secrets?provider={provider}&category=datasource-import`
 
 The dropdown shows:
 - Existing managed secrets matching the provider and category
@@ -211,7 +211,7 @@ type SplitHorizonTLSConfig struct {
 #### Component UI Schema Reference
 
 Components reference secret definitions.
-Below is an example, but final UI schema components will change as it may be more practical to have additional UI type rather than expand select UI type.
+Below is an example, but final UI schema components will change.
 
 ```yaml
 # definition/components/splithorizon/component.yaml
@@ -221,21 +221,22 @@ ui:
       label: "Split Horizon Configuration"
       components:
         tlsSecret:
-          uiType: select
+          uiType: secret # New - may change
           path: spec.components.splithorizon.config.secretRef.name
           fieldParams:
             label: "TLS Certificate"
             secretDefinition: splithorizon-tls  # New: References definition/secrets/splithorizon-tls
-            createLabel: "+ Add New Certificate" # New
-          dataSource:
-            provider: secret # Fetch from `GET /v1/namespaces/{ns}/secrets?provider={provider}&category=datasource-import`
-            category: component-splithorizon # New
+            createLabel: "+ Add New Certificate" # New - may change
+          dataSource: # Fetch from `GET /secrets?provider=provider-percona-server-mongodb&category=component-splithorizon`
+            provider: secret # New - may change
+            category: component-splithorizon # New - may change
+            instance-provider: provider-percona-server-mongodb # New - may change
           validation:
             required: true
 ```
 
 **How it works:**
-1. Dropdown populated via `GET /secrets?provider={provider}&category=component-splithorizon`
+1. Dropdown populated via `GET /secrets?provider=provider-percona-server-mongodb&category=component-splithorizon`
 2. Shows existing secrets matching the category
 3. "Add New" button opens creation modal rendered from `definition/secrets/splithorizon-tls/ui.yaml`
 4. Schema validation uses `definition/secrets/splithorizon-tls/secret.yaml` config
@@ -245,14 +246,16 @@ ui:
 **Lifecycle Management:**
 
 Some Secrets and ConfigMaps are shared across multiple Instances (e.g., SplitHorizon TLS certificates) and should persist after individual Instances are deleted. Others are Instance-specific (e.g., database user credentials) and should be deleted when their owning Instance is removed.
-
 Providers control lifecycle behavior by configuring whether to set owner references on Secrets and ConfigMaps. Resources with owner references are automatically garbage-collected when the owning Instance is deleted.
 
 A Settings page is provided in the OpenEverest UI to manage Secrets and ConfigMaps that are no longer needed.
+It allows viewing and deleting Secrets and ConfigMaps shared by multiple Instances.
 
 Under Settings, a dedicated management page allows users to view and manage Secrets and ConfigMaps:
 
-**Location:** Settings → Secrets and Settings → ConfigMaps
+**Location:**
+- Settings → Secrets
+- Settings → ConfigMaps
 
 **Layout:**
 - **Tabs**: resources are grouped by:
