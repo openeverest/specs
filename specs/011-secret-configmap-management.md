@@ -63,6 +63,7 @@ metadata:
 |--------|----------|-------------|
 | POST | `/clusters/{cluster}/namespaces/{ns}/secrets` | Create secret |
 | GET | `/clusters/{cluster}/namespaces/{ns}/secrets` | List secrets (only metadata without content) |
+| GET | `/clusters/{cluster}/namespaces/{ns}/secrets/{name}` | Get secret (only metadata data) |
 | DELETE | `/clusters/{cluster}/namespaces/{ns}/secrets/{name}` | Delete secret |
 
 #### ConfigMaps
