@@ -53,7 +53,7 @@ metadata:
 **Label meanings:**
 - `openeverest.io/managed: "true"` — Secrets and ConfigMaps are managed by OpenEverest
 - `openeverest.io/provider` — Provider that uses Secrets and ConfigMaps type (empty for Secrets or ConfigMaps shared across providers)
-- `openeverest.io/category` — Secrets and ConfigMaps category for filtering (e.g., `component-splithorizon`, `component-engine`, `datasource-import`)
+- `openeverest.io/category` — Secrets and ConfigMaps category for filtering (e.g., `component-splithorizon`, `datasource-import`)
 
 ### 4.2. API Endpoints
 
@@ -111,18 +111,16 @@ The request body follows Kubernetes Secret/ConfigMap format with OpenEverest-spe
 
 ### 4.3. Instance Creation Flow
 
-When configuring a component that requires a Secret or ConfigMap, the UI displays a dropdown populated by calling:
+When configuring a component that requires a Secret or ConfigMap, the UI displays a dropdown and/or add secret option decided by provider developer.
 
-```
-GET /clusters/{cluster}/namespaces/{ns}/secrets?provider={provider}&category={category}
-```
+Note that provider filter is optional, some secrets may be shared by multiple providers.
 
 **Examples:**
 - Split horizon: `GET /clusters/{cluster}/namespaces/{ns}/secrets?provider={provider}&category=component-splithorizon`
-- Import datasource: `GET /clusters/{cluster}/namespaces/{ns}/secrets?provider={provider}&category=datasource-import`
+- Import datasource: Show add secret option
 
-The dropdown shows:
-- Existing managed secrets matching the provider and category
+The UI shows:
+- Existing managed secrets matching the provider and category (optional)
 - Option to "Create New" which opens the creation form
 
 **Inline Creation Flow:**
@@ -241,6 +239,58 @@ ui:
 2. Shows existing secrets matching the category
 3. "Add New" button opens creation modal rendered from `definition/secrets/splithorizon-tls/ui.yaml`
 4. Schema validation uses `definition/secrets/splithorizon-tls/secret.yaml` config
+
+#### Data Importer Example
+
+For data importer, instance creation flow (or separate flow as currently done in OpenEverest v1) require additional steps to populate necessary secrets.
+The example secret `my-mongo-cluster-import-creds` is used only by this instance.
+
+```
+apiVersion: instance.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: my-mongo-cluster
+  namespace: production
+spec:
+  provider: percona-server-mongodb
+  topology: replica-set
+  resources:
+    cpu: "2"
+    memory: 4Gi
+  storage:
+    size: 50Gi
+    class: standard
+
+  dataSource:
+    type: External # NEW
+    external: # NEW
+      backupClassName: psmdb-mongoimport-import
+      storageName: s3-external-data
+      config:
+        path: /imports/users.json
+        credentialsSecretName: my-mongo-cluster-import-creds
+```
+
+Below is the content of an example of required secret:
+
+```
+apiVersion: v1
+kind: Secret
+metadata:
+  name: my-mongo-cluster-import-creds
+  namespace: production
+type: Opaque
+stringData:
+  MONGODB_BACKUP_USER: "backup"
+  MONGODB_BACKUP_PASSWORD: "<secure-password>"
+  MONGODB_CLUSTER_ADMIN_USER: "clusterAdmin"
+  MONGODB_CLUSTER_ADMIN_PASSWORD: "<secure-password>"
+  MONGODB_CLUSTER_MONITOR_USER: "clusterMonitor"
+  MONGODB_CLUSTER_MONITOR_PASSWORD: "<secure-password>"
+  MONGODB_DATABASE_ADMIN_USER: "databaseAdmin"
+  MONGODB_DATABASE_ADMIN_PASSWORD: "<secure-password>"
+  MONGODB_USER_ADMIN_PASSWORD: "<secure-password>"
+```
 
 ### 4.5. Settings
 
