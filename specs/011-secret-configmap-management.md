@@ -232,19 +232,29 @@ If the secret was found, but does not contain the label `"openeverest.io/managed
       "replicaSet": { ... },
       "sharded": { ... },
     },
-    "secretUISchemas": {
+    "secrets":{
       "splithorizon-tls": { // Use this for category
-        // UI schema for split horizon
-        "sections": {
-          "certificate": {
-            "label": "TLS Certificate",
-            "components": {}
+        "uiSchema": { 
+          // UI schema for split horizon
+          "sections": {
+            "certificate": {
+              "label": "TLS Certificate",
+              "components": {}
+            }
           }
-        }
+        },
       },
       "data-importer-credentials": {
-        // UI schema for data importer credentials
+        "uiSchema": {
+          // UI schema for data importer credentials
+        }
       },
+      "cross-provider-secret": {
+        "uiSchema": {
+          // UI schema used by multiple providers
+        },
+        "shared": true,
+      }
     }
   }
 }
@@ -408,7 +418,7 @@ definition/
       types.go         # Go types for schema validation
 ```
 
-#### Secret Definition Example
+#### Secret Definition
 
 **secret.yaml:**
 ```yaml
@@ -416,10 +426,15 @@ definition/
 displayName: "TLS Certificate"
 description: "TLS certificate for split horizon DNS"
 category: splithorizon-tls
+shared: false # set true if secrets are shared by multiple providers
 
 config:
   openAPIV3Schema: SplitHorizonTLSConfig
 ```
+
+Sharing secret between multiple providers is exceptional use case.
+If each provider declares `shared: true` in their secret definition, the secret can be used by multiple providers.
+Each provider still explicitly declares its secret schema, making it fragile if schema is declared differently by different providers. This may cause OpenEverest secret management UI to behave unexpectedly.
 
 **ui.yaml:**
 ```yaml
@@ -494,8 +509,11 @@ ui:
 
 **Lifecycle Management:**
 
-Some Secrets and ConfigMaps are shared across multiple Instances (e.g., SplitHorizon TLS certificates) and should persist after individual Instances are deleted. Others are Instance-specific (e.g., database user credentials) and should be deleted when their owning Instance is removed.
-Providers control lifecycle behavior by configuring whether to set owner references on Secrets and ConfigMaps. Resources with owner references are automatically garbage-collected when the owning Instance is deleted.
+Some Secrets and ConfigMaps are shared across multiple Instances (e.g., SplitHorizon TLS certificates) and should persist after individual Instances are deleted.
+Others are Instance-specific (e.g., database user credentials) and should be deleted when their owning Instance is removed.
+Providers control lifecycle behavior by configuring whether to set owner references on Secrets and ConfigMaps.
+Either owner reference to Instance or finalizers are set by the providers.
+Resources with owner references are automatically garbage-collected when the owning Instance is deleted.
 
 A Settings page is provided in the OpenEverest UI to manage Secrets and ConfigMaps that are no longer needed.
 It allows viewing and deleting Secrets and ConfigMaps shared by multiple Instances.
