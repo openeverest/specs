@@ -3,7 +3,7 @@
 *   **Status:** Draft
 *   **Authors:** @chilagrow
 *   **Created:** 2026-06-30
-*   **Last Updated:** 2026-07-09
+*   **Last Updated:** 2026-07-13
 *   **Related Issues:** https://github.com/openeverest/openeverest/issues/1798, https://github.com/openeverest/openeverest/issues/2471
 
 
@@ -46,14 +46,14 @@ metadata:
   namespace: default
   labels:
     openeverest.io/managed: "true"                             # Created via OpenEverest API
-    openeverest.io/provider: "provider-percona-server-mongodb" # Provider name
-    openeverest.io/category: "component-splithorizon"          # Resource category for filtering
+    openeverest.io/provider: "provider-percona-server-mongodb" # Provider name (same as spec.provider in Instance CR)
+    openeverest.io/category: "splithorizon-tls"                # Resource category for filtering
 ```
 
 **Label meanings:**
-- `openeverest.io/managed: "true"` — Secrets and ConfigMaps are managed by OpenEverest
+- `openeverest.io/managed: "true"` — Secrets and ConfigMaps created by OpenEverest API
 - `openeverest.io/provider` — Provider that uses Secrets and ConfigMaps type (empty for Secrets or ConfigMaps shared across providers)
-- `openeverest.io/category` — Secrets and ConfigMaps category for filtering (e.g., `component-splithorizon`, `datasource-import`)
+- `openeverest.io/category` — Secrets and ConfigMaps category for filtering (e.g., `splithorizon-tls`, `data-import-credentials`)
 
 ### 4.2. API Endpoints
 
@@ -65,6 +65,7 @@ metadata:
 | GET | `/clusters/{cluster}/namespaces/{ns}/secrets` | List secrets (only metadata without content) |
 | GET | `/clusters/{cluster}/namespaces/{ns}/secrets/{name}` | Get secret (only metadata data) |
 | DELETE | `/clusters/{cluster}/namespaces/{ns}/secrets/{name}` | Delete secret |
+| GET | `/clusters/{cluster}/providers/{name}` | Get secret UI schema definitions |
 
 #### ConfigMaps
 
@@ -73,11 +74,119 @@ metadata:
 | POST | `/clusters/{cluster}/namespaces/{ns}/configmaps` | Create configmap |
 | GET | `/clusters/{cluster}/namespaces/{ns}/configmaps` | List configmaps |
 | GET | `/clusters/{cluster}/namespaces/{ns}/configmaps/{name}` | Get configmap (includes data) |
-| DELETE | `/clusters/{cluster}1/namespaces/{ns}/configmaps/{name}` | Delete configmap |
+| DELETE | `/clusters/{cluster}/namespaces/{ns}/configmaps/{name}` | Delete configmap |
+| GET | `/clusters/{cluster}/providers/{name}` | Get configmap UI schema definitions |
 
-#### Create Request
+#### `POST /clusters/{cluster}/namespaces/{ns}/secrets`
 
-The request body follows Kubernetes Secret/ConfigMap format with OpenEverest-specific labels:
+The request body follows Kubernetes Secret/ConfigMap format with OpenEverest-specific labels.
+The label `openeverest.io/category` is required.
+
+For creating base64 encoded request:
+
+```json
+{
+  "apiVersion": "v1",
+  "kind": "Secret",
+  "metadata": {
+    "name": "my-splithorizon-cert",
+    "namespace": "default",
+    "labels": {
+      "openeverest.io/provider": "provider-percona-server-mongodb",
+      "openeverest.io/category": "splithorizon-tls"
+    }
+  },
+  "type": "Opaque",
+  "data": {
+    "tls.crt": "<base64-encoded>",
+    "tls.key": "<base64-encoded>"
+  }
+}
+```
+
+For plaintext request:
+
+```json
+{
+  "apiVersion": "v1",
+  "kind": "Secret",
+  "metadata": {
+    "name": "my-splithorizon-cert",
+    "namespace": "default",
+    "labels": {
+      "openeverest.io/provider": "provider-percona-server-mongodb",
+      "openeverest.io/category": "splithorizon-tls"
+    }
+  },
+  "type": "Opaque",
+  "stringData": {
+    "tls.crt": "<plaintext>",
+    "tls.key": "<plaintext>"
+  }
+}
+```
+
+**Conflict Handling:**
+
+If a secret with the same name already exists, the API server applies the following logic:
+
+**Check owner reference**: If the existing secret has an owner reference set:
+- Return `409 CONFLICT` with message: "Secret is owned by another resource"
+- User must choose a different name or delete the owning Instance first
+
+**Orphaned secret**: If no owner reference and not in use:
+- Delete the existing orphaned secret
+- Create the new secret with the provided configuration
+- Return `201 CREATED`
+
+This prevents race conditions and ensures secrets are not accidentally overwritten while in use.
+
+Response strips `data` and `stringData`:
+```json
+{
+  "apiVersion": "v1",
+  "kind": "Secret",
+  "metadata": {
+    "name": "my-splithorizon-cert",
+    "namespace": "default",
+    "labels": {
+      "openeverest.io/managed": "true", // Added by API server
+      "openeverest.io/provider": "provider-percona-server-mongodb",
+      "openeverest.io/category": "splithorizon-tls"
+    }
+  },
+  "type": "Opaque",
+  // no data or stringData
+}
+```
+
+#### `GET /clusters/{cluster}/namespaces/{ns}/secrets`
+
+Response strips `data` and `stringData`:
+
+```json
+[{
+  "apiVersion": "v1",
+  "kind": "Secret",
+  "metadata": {
+    "name": "my-splithorizon-cert",
+    "namespace": "default",
+    "labels": {
+      "openeverest.io/managed": "true",
+      "openeverest.io/provider": "provider-percona-server-mongodb",
+      "openeverest.io/category": "splithorizon-tls"
+    }
+  },
+  "type": "Opaque",
+  // no data or stringData
+}]
+```
+
+The response list contains secrets with `"openeverest.io/managed": "true"` label. Also filters the secrets based on the user's `read` RBAC permission on `secrets`.
+
+#### `GET /clusters/{cluster}/namespaces/{ns}/secrets/{name}`
+
+The response is the same as an item of list:
 
 ```json
 {
@@ -89,25 +198,77 @@ The request body follows Kubernetes Secret/ConfigMap format with OpenEverest-spe
     "labels": {
       "openeverest.io/managed": "true",
       "openeverest.io/provider": "provider-percona-server-mongodb",
-      "openeverest.io/category": "component-splithorizon"
+      "openeverest.io/category": "splithorizon-tls"
     }
   },
   "type": "Opaque",
-  "data": {
-    "tls.crt": "<base64-encoded>",
-    "tls.key": "<base64-encoded>"
+  // no data or stringData
+}
+```
+
+If the secret was found, but does not contain the label `"openeverest.io/managed": "true"`, server returns 404.
+
+#### `DELETE /clusters/{cluster}/namespaces/{ns}/secrets/{name}`
+
+On success, returns 204 with no body.
+
+If the secret has owner reference, it returns CONFLICT 409.
+
+If the secret was found, but does not contain the label `"openeverest.io/managed": "true"`, it returns 404.
+
+#### `GET /clusters/{cluster}/providers/{name}`
+
+```json
+{
+  "metadata": {
+    "name": "percona-server-mongodb",
+  },
+  "spec": {
+    "componentTypes": { ... },
+    "components": { ... },
+    "topologies": { ... },
+    "versions": [ ... ],
+    "uiSchema": {
+      "replicaSet": { ... },
+      "sharded": { ... },
+    },
+    "secretUISchemas": {
+      "splithorizon-tls": { // Use this for category
+        // UI schema for split horizon
+        "sections": {
+          "certificate": {
+            "label": "TLS Certificate",
+            "components": {}
+          }
+        }
+      },
+      "data-importer-credentials": {
+        // UI schema for data importer credentials
+      },
+    }
   }
 }
 ```
 
 **Label examples:**
-- Component secret: `"openeverest.io/category": "component-splithorizon"`
-- Import credential: `"openeverest.io/category": "datasource-import"`
+- Component secret: `"openeverest.io/category": "splithorizon-tls"`
+- Import credential: `"openeverest.io/category": "data-import-credentials"`
 
 #### Query Parameters (List)
 
-- `provider` — Filter by provider name
-- `category` — Filter by category
+**Filtering:**
+- `provider` — Filter by provider name (e.g., `provider=percona-server-mongodb`)
+  - Empty or omitted: returns resources from all providers
+  - Special value `""` (empty string): returns only shared resources (no provider label)
+- `category` — Filter by category (e.g., `category=splithorizon-tls`)
+  - Can be combined with provider filter
+
+**Examples:**
+- `/secrets` — All managed secrets
+- `/secrets?provider=percona-server-mongodb` — Provider-specific secrets
+- `/secrets?provider=percona-server-mongodb&category=splithorizon-tls` — Category within provider
+- `/secrets?category=splithorizon-tls` — Category across all providers
+- `/secrets?provider=` — Only shared secrets (no provider label)
 
 ### 4.3. Instance Creation Flow
 
@@ -116,8 +277,8 @@ When configuring a component that requires a Secret or ConfigMap, the UI display
 Note that provider filter is optional, some secrets may be shared by multiple providers.
 
 **Examples:**
-- Split horizon: `GET /clusters/{cluster}/namespaces/{ns}/secrets?provider={provider}&category=component-splithorizon`
-- Import datasource: Show add secret option
+- Split horizon: `GET /clusters/{cluster}/namespaces/{ns}/secrets?provider={provider}&category=splithorizon-tls`
+- Import credentials: Show add secret option
 
 The UI shows:
 - Existing managed secrets matching the provider and category (optional)
@@ -167,6 +328,9 @@ kind: Secret
 metadata:
   name: my-splithorizon
   namespace: production
+  labels:
+    openeverest.io/provider: percona-server-mongodb
+    openeverest.io/category: splithorizon-tls
 type: Opaque
 data:
   tls.crt: "<secure-crt>"
@@ -208,6 +372,9 @@ kind: Secret
 metadata:
   name: my-mongo-cluster-import-creds
   namespace: production
+  labels:
+    openeverest.io/provider: percona-server-mongodb
+    openeverest.io/category: data-import-credentials
 type: Opaque
 data:
   MONGODB_BACKUP_USER: "backup"
@@ -248,7 +415,7 @@ definition/
 # definition/secrets/splithorizon-tls/secret.yaml
 displayName: "TLS Certificate"
 description: "TLS certificate for split horizon DNS"
-category: component-splithorizon
+category: splithorizon-tls
 
 config:
   openAPIV3Schema: SplitHorizonTLSConfig
@@ -296,7 +463,7 @@ Components reference secret definitions.
 Below is an example, but final UI schema components will change.
 
 ```yaml
-# definition/components/splithorizon/component.yaml
+# definition/topologies/<topology>/topology.yaml
 ui:
   sections:
     configuration:
@@ -309,16 +476,16 @@ ui:
             label: "TLS Certificate"
             secretDefinition: splithorizon-tls  # New: References definition/secrets/splithorizon-tls
             createLabel: "+ Add New Certificate" # New - may change
-          dataSource: # Fetch from `GET /secrets?provider=provider-percona-server-mongodb&category=component-splithorizon`
+          dataSource: # Fetch from `GET /secrets?provider=provider-percona-server-mongodb&category=splithorizon-tls`
             provider: secret # New - may change
-            category: component-splithorizon # New - may change
+            category: splithorizon-tls # New - may change
             instance-provider: provider-percona-server-mongodb # New - may change
           validation:
             required: true
 ```
 
 **How it works:**
-1. Dropdown populated via `GET /secrets?provider=provider-percona-server-mongodb&category=component-splithorizon`
+1. Dropdown populated via `GET /secrets?provider=provider-percona-server-mongodb&category=splithorizon-tls`
 2. Shows existing secrets matching the category
 3. "Add New" button opens creation modal rendered from `definition/secrets/splithorizon-tls/ui.yaml`
 4. Schema validation uses `definition/secrets/splithorizon-tls/secret.yaml` config
@@ -342,14 +509,11 @@ Under Settings, a dedicated management page allows users to view and manage Secr
 **Layout:**
 - **Tabs**: resources are grouped by:
   1. **Provider** (e.g., "provider-percona-server-mongodb")
-  2. **Category** within each provider (e.g., "component-splithorizon", "datasource-import")
+  2. **Category** within each provider (e.g., "splithorizon-tls", "data-import-credentials")
 
 The list view displays each item and following actions: 
 - **View**: GET (Secret data is not shown for security)
 - **Delete**: DELETE with validation
-
-**Deleting Secrets or ConfigMaps used by Instances:**
-- DELETE request will succeed but it won't be deleted until no Instance is using it
 
 ### 4.6. RBAC
 
@@ -358,6 +522,8 @@ Access to Secret and ConfigMap management endpoints uses Casbin RBAC for authori
 #### Casbin Policy Model
 
 OpenEverest uses Casbin's RBAC with resource-based access control:
+- `secrets` RBAC resource name for Secrets
+- `config-maps` RBAC resource name for ConfigMaps
 
 #### Casbin Policies
 
@@ -365,6 +531,15 @@ OpenEverest uses Casbin's RBAC with resource-based access control:
 - `create` - Create new Secret/ConfigMap
 - `read` - List and view metadata
 - `delete` - Delete Secret/ConfigMap
+
+**Resource Pattern Format:**
+```
+{cluster}/{namespace}/{name}
+```
+
+**Wildcard Rules:**
+- `*` matches any value at that level
+- `**` not supported (use explicit wildcards at each level)
 
 **Policy Examples:**
 - `p, role:test, secrets, read, prod/*/*` - All secrets in a namespace
@@ -375,7 +550,7 @@ OpenEverest uses Casbin's RBAC with resource-based access control:
 ## 5. Definition of Done
 
 - [ ] API endpoints implemented for Secrets (Create, List, Update, Delete)
-- [ ] API endpoints implemented for ConfigMaps (Create, List, Get, Update, Delete)
+- [ ] API endpoints implemented for ConfigMaps (Create, List, Get, Delete)
 - [ ] Labels applied correctly on Secrets and ConfigMaps creation
 - [ ] Management UI in Settings for viewing, updating, and deleting Secrets/ConfigMaps
 - [ ] Delete prevents deletion of in-use resources
