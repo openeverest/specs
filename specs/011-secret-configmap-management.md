@@ -71,10 +71,10 @@ metadata:
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/clusters/{cluster}/namespaces/{ns}/configmaps` | Create configmap |
-| GET | `/clusters/{cluster}/namespaces/{ns}/configmaps` | List configmaps |
-| GET | `/clusters/{cluster}/namespaces/{ns}/configmaps/{name}` | Get configmap (includes data) |
-| DELETE | `/clusters/{cluster}/namespaces/{ns}/configmaps/{name}` | Delete configmap |
+| POST | `/clusters/{cluster}/namespaces/{ns}/config-maps` | Create configmap |
+| GET | `/clusters/{cluster}/namespaces/{ns}/config-maps` | List configmaps |
+| GET | `/clusters/{cluster}/namespaces/{ns}/config-maps/{name}` | Get configmap (includes data) |
+| DELETE | `/clusters/{cluster}/namespaces/{ns}/config-maps/{name}` | Delete configmap |
 | GET | `/clusters/{cluster}/providers/{name}` | Get configmap UI schema definitions |
 
 #### `POST /clusters/{cluster}/namespaces/{ns}/secrets`
@@ -411,9 +411,9 @@ definition/
       secret.yaml      # Metadata and schema reference
       ui.yaml          # UI rendering hints
       types.go         # Go types for schema validation
-  configmaps/
+  config-maps/
     custom-mongod/
-      configmap.yaml   # Metadata and schema reference
+      config-map.yaml   # Metadata and schema reference
       ui.yaml          # UI rendering hints
       types.go         # Go types for schema validation
 ```
@@ -563,7 +563,7 @@ OpenEverest uses Casbin's RBAC with resource-based access control:
 - `p, role:test, secrets, read, prod/*/*` - All secrets in a namespace
 - `p, role:test, secrets, read, prod/ns1/*`  - Secrets in specific namespace
 - `p, role:test, secrets, read, prod/ns1/secret1`  - Specific secret in specific namespace
-- `p, role:test, configmaps, read, prod/*/*` - All configmaps in a namespace
+- `p, role:test, config-maps, read, prod/*/*` - All ConfigMaps in a namespace
 
 ## 5. Definition of Done
 
