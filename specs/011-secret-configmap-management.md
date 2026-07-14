@@ -47,13 +47,13 @@ metadata:
   labels:
     openeverest.io/managed: "true"                             # Created via OpenEverest API
     openeverest.io/provider: "provider-percona-server-mongodb" # Provider name (same as spec.provider in Instance CR)
-    openeverest.io/category: "splithorizon-tls"                # Resource category for filtering
+    openeverest.io/definition: "splithorizon-tls"                # Resource definition for filtering
 ```
 
 **Label meanings:**
 - `openeverest.io/managed: "true"` — Secrets and ConfigMaps created by OpenEverest API
 - `openeverest.io/provider` — Provider that uses Secrets and ConfigMaps type (empty for Secrets or ConfigMaps shared across providers)
-- `openeverest.io/category` — Secrets and ConfigMaps category for filtering (e.g., `splithorizon-tls`, `data-import-credentials`)
+- `openeverest.io/definition` — Secrets and ConfigMaps definition for filtering (e.g., `splithorizon-tls`, `data-import-credentials`)
 
 ### 4.2. API Endpoints
 
@@ -80,7 +80,7 @@ metadata:
 #### `POST /clusters/{cluster}/namespaces/{ns}/secrets`
 
 The request body follows Kubernetes Secret/ConfigMap format with OpenEverest-specific labels.
-The label `openeverest.io/category` is required.
+The label `openeverest.io/definition` is required.
 
 For creating base64 encoded request:
 
@@ -93,7 +93,7 @@ For creating base64 encoded request:
     "namespace": "default",
     "labels": {
       "openeverest.io/provider": "provider-percona-server-mongodb",
-      "openeverest.io/category": "splithorizon-tls"
+      "openeverest.io/definition": "splithorizon-tls"
     }
   },
   "type": "Opaque",
@@ -115,7 +115,7 @@ For plaintext request:
     "namespace": "default",
     "labels": {
       "openeverest.io/provider": "provider-percona-server-mongodb",
-      "openeverest.io/category": "splithorizon-tls"
+      "openeverest.io/definition": "splithorizon-tls"
     }
   },
   "type": "Opaque",
@@ -152,7 +152,7 @@ Response strips `data` and `stringData`:
     "labels": {
       "openeverest.io/managed": "true", // Added by API server
       "openeverest.io/provider": "provider-percona-server-mongodb",
-      "openeverest.io/category": "splithorizon-tls"
+      "openeverest.io/definition": "splithorizon-tls"
     }
   },
   "type": "Opaque",
@@ -174,7 +174,7 @@ Response strips `data` and `stringData`:
     "labels": {
       "openeverest.io/managed": "true",
       "openeverest.io/provider": "provider-percona-server-mongodb",
-      "openeverest.io/category": "splithorizon-tls"
+      "openeverest.io/definition": "splithorizon-tls"
     }
   },
   "type": "Opaque",
@@ -198,7 +198,7 @@ The response is the same as an item of list:
     "labels": {
       "openeverest.io/managed": "true",
       "openeverest.io/provider": "provider-percona-server-mongodb",
-      "openeverest.io/category": "splithorizon-tls"
+      "openeverest.io/definition": "splithorizon-tls"
     }
   },
   "type": "Opaque",
@@ -233,7 +233,7 @@ If the secret was found, but does not contain the label `"openeverest.io/managed
       "sharded": { ... },
     },
     "secrets":{
-      "splithorizon-tls": { // Use this for category
+      "splithorizon-tls": { // Use this for definition
         "uiSchema": { 
           // UI schema for split horizon
           "sections": {
@@ -261,8 +261,8 @@ If the secret was found, but does not contain the label `"openeverest.io/managed
 ```
 
 **Label examples:**
-- Component secret: `"openeverest.io/category": "splithorizon-tls"`
-- Import credential: `"openeverest.io/category": "data-import-credentials"`
+- Component secret: `"openeverest.io/definition": "splithorizon-tls"`
+- Import credential: `"openeverest.io/definition": "data-import-credentials"`
 
 #### Query Parameters (List)
 
@@ -270,14 +270,14 @@ If the secret was found, but does not contain the label `"openeverest.io/managed
 - `provider` — Filter by provider name (e.g., `provider=percona-server-mongodb`)
   - Empty or omitted: returns resources from all providers
   - Special value `""` (empty string): returns only shared resources (no provider label)
-- `category` — Filter by category (e.g., `category=splithorizon-tls`)
+- `definition` — Filter by definition (e.g., `definition=splithorizon-tls`)
   - Can be combined with provider filter
 
 **Examples:**
 - `/secrets` — All managed secrets
 - `/secrets?provider=percona-server-mongodb` — Provider-specific secrets
-- `/secrets?provider=percona-server-mongodb&category=splithorizon-tls` — Category within provider
-- `/secrets?category=splithorizon-tls` — Category across all providers
+- `/secrets?provider=percona-server-mongodb&definition=splithorizon-tls` — Definition within provider
+- `/secrets?definition=splithorizon-tls` — Definition across all providers
 - `/secrets?provider=` — Only shared secrets (no provider label)
 
 ### 4.3. Instance Creation Flow
@@ -287,11 +287,11 @@ When configuring a component that requires a Secret or ConfigMap, the UI display
 Note that provider filter is optional, some secrets may be shared by multiple providers.
 
 **Examples:**
-- Split horizon: `GET /clusters/{cluster}/namespaces/{ns}/secrets?provider={provider}&category=splithorizon-tls`
+- Split horizon: `GET /clusters/{cluster}/namespaces/{ns}/secrets?provider={provider}&definition=splithorizon-tls`
 - Import credentials: Show add secret option
 
 The UI shows:
-- Existing managed secrets matching the provider and category (optional)
+- Existing managed secrets matching the provider and definition (optional)
 - Option to "Create New" which opens the creation form
 
 **Inline Creation Flow:**
@@ -340,7 +340,7 @@ metadata:
   namespace: production
   labels:
     openeverest.io/provider: percona-server-mongodb
-    openeverest.io/category: splithorizon-tls
+    openeverest.io/definition: splithorizon-tls
 type: Opaque
 data:
   tls.crt: "<secure-crt>"
@@ -384,7 +384,7 @@ metadata:
   namespace: production
   labels:
     openeverest.io/provider: percona-server-mongodb
-    openeverest.io/category: data-import-credentials
+    openeverest.io/definition: data-import-credentials
 type: Opaque
 data:
   MONGODB_BACKUP_USER: "backup"
@@ -425,7 +425,7 @@ definition/
 # definition/secrets/splithorizon-tls/secret.yaml
 displayName: "TLS Certificate"
 description: "TLS certificate for split horizon DNS"
-category: splithorizon-tls
+definition: splithorizon-tls
 shared: false # set true if secrets are shared by multiple providers
 
 config:
@@ -491,17 +491,17 @@ ui:
             label: "TLS Certificate"
             secretDefinition: splithorizon-tls  # New: References definition/secrets/splithorizon-tls
             createLabel: "+ Add New Certificate" # New - may change
-          dataSource: # Fetch from `GET /secrets?provider=provider-percona-server-mongodb&category=splithorizon-tls`
+          dataSource: # Fetch from `GET /secrets?provider=provider-percona-server-mongodb&definition=splithorizon-tls`
             provider: secret # New - may change
-            category: splithorizon-tls # New - may change
+            definition: splithorizon-tls # New - may change
             instance-provider: provider-percona-server-mongodb # New - may change
           validation:
             required: true
 ```
 
 **How it works:**
-1. Dropdown populated via `GET /secrets?provider=provider-percona-server-mongodb&category=splithorizon-tls`
-2. Shows existing secrets matching the category
+1. Dropdown populated via `GET /secrets?provider=provider-percona-server-mongodb&definition=splithorizon-tls`
+2. Shows existing secrets matching the definition
 3. "Add New" button opens creation modal rendered from `definition/secrets/splithorizon-tls/ui.yaml`
 4. Schema validation uses `definition/secrets/splithorizon-tls/secret.yaml` config
 
@@ -527,7 +527,7 @@ Under Settings, a dedicated management page allows users to view and manage Secr
 **Layout:**
 - **Tabs**: resources are grouped by:
   1. **Provider** (e.g., "provider-percona-server-mongodb")
-  2. **Category** within each provider (e.g., "splithorizon-tls", "data-import-credentials")
+  2. **Definition** within each provider (e.g., "splithorizon-tls", "data-import-credentials")
 
 The list view displays each item and following actions: 
 - **View**: GET (Secret data is not shown for security)
