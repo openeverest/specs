@@ -240,7 +240,7 @@ If the secret was found, but does not contain the label `"openeverest.io/managed
             "certificate": {
               "label": "TLS Certificate",
               "components": {}
-           }
+            }
           }
         },
         "openAPIV3Schema": {
