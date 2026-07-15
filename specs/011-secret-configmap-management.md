@@ -240,18 +240,29 @@ If the secret was found, but does not contain the label `"openeverest.io/managed
             "certificate": {
               "label": "TLS Certificate",
               "components": {}
-            }
+           }
           }
+        },
+        "openAPIV3Schema": {
+          "properties": {
+            "tls.crt": "string",
+            "tls.key": "string"
+          },
+          "type": "object"
         },
       },
       "data-importer-credentials": {
         "uiSchema": {
           // UI schema for data importer credentials
+        },
+        "openAPIV3Schema": {
         }
       },
       "cross-provider-secret": {
         "uiSchema": {
           // UI schema used by multiple providers
+        },
+        "openAPIV3Schema": {
         },
         "shared": true,
       }
