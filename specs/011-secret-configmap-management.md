@@ -52,7 +52,7 @@ metadata:
 
 **Label meanings:**
 - `openeverest.io/managed: "true"` — Secrets and ConfigMaps created by OpenEverest API
-- `openeverest.io/provider` — Provider that uses Secrets and ConfigMaps type (empty for Secrets or ConfigMaps shared across providers)
+- `openeverest.io/provider` — Provider that uses Secrets and ConfigMaps type
 - `openeverest.io/definition` — Secrets and ConfigMaps definition for filtering (e.g., `splithorizon-tls`, `data-import-credentials`)
 
 ### 4.2. API Endpoints
@@ -80,7 +80,7 @@ metadata:
 #### `POST /clusters/{cluster}/namespaces/{ns}/secrets`
 
 The request body follows Kubernetes Secret/ConfigMap format with OpenEverest-specific labels.
-The label `openeverest.io/definition` is required.
+The labels `openeverest.io/definition` and `openeverest.io/provider` are required.
 
 For creating base64 encoded request:
 
@@ -257,14 +257,6 @@ If the secret was found, but does not contain the label `"openeverest.io/managed
         },
         "openAPIV3Schema": {
         }
-      },
-      "cross-provider-secret": {
-        "uiSchema": {
-          // UI schema used by multiple providers
-        },
-        "openAPIV3Schema": {
-        },
-        "shared": true,
       }
     }
   }
@@ -279,8 +271,6 @@ If the secret was found, but does not contain the label `"openeverest.io/managed
 
 **Filtering:**
 - `provider` — Filter by provider name (e.g., `provider=percona-server-mongodb`)
-  - Empty or omitted: returns resources from all providers
-  - Special value `""` (empty string): returns only shared resources (no provider label)
 - `definition` — Filter by definition (e.g., `definition=splithorizon-tls`)
   - Can be combined with provider filter
 
@@ -289,13 +279,10 @@ If the secret was found, but does not contain the label `"openeverest.io/managed
 - `/secrets?provider=percona-server-mongodb` — Provider-specific secrets
 - `/secrets?provider=percona-server-mongodb&definition=splithorizon-tls` — Definition within provider
 - `/secrets?definition=splithorizon-tls` — Definition across all providers
-- `/secrets?provider=` — Only shared secrets (no provider label)
 
 ### 4.3. Instance Creation Flow
 
 When configuring a component that requires a Secret or ConfigMap, the UI displays a dropdown and/or add secret option decided by provider developer.
-
-Note that provider filter is optional, some secrets may be shared by multiple providers.
 
 **Examples:**
 - Split horizon: `GET /clusters/{cluster}/namespaces/{ns}/secrets?provider={provider}&definition=splithorizon-tls`
@@ -437,15 +424,10 @@ definition/
 displayName: "TLS Certificate"
 description: "TLS certificate for split horizon DNS"
 definition: splithorizon-tls
-shared: false # set true if secrets are shared by multiple providers
 
 config:
   openAPIV3Schema: SplitHorizonTLSConfig
 ```
-
-Sharing secret between multiple providers is exceptional use case.
-If each provider declares `shared: true` in their secret definition, the secret can be used by multiple providers.
-Each provider still explicitly declares its secret schema, making it fragile if schema is declared differently by different providers. This may cause OpenEverest secret management UI to behave unexpectedly.
 
 **ui.yaml:**
 ```yaml
@@ -593,6 +575,7 @@ OpenEverest uses Casbin's RBAC with resource-based access control:
 | Alternative | Decision | Reason |
 |-------------|----------|--------|
 | Embed secret config in Instance spec | Rejected | No reuse across Instances; large specs |
+| Cross-provider shared secrets | Rejected | Adds complexity; each provider must declare identical schemas; fragile if schemas differ between providers; can be revisited if strong use case emerges |
 
 ## 7. Open Questions
 
