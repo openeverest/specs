@@ -3,7 +3,7 @@
 *   **Status:** Draft
 *   **Authors:** @chilagrow
 *   **Created:** 2026-06-26
-*   **Last Updated:** 2026-07-14
+*   **Last Updated:** 2026-07-17
 *   **Related Issues:** https://github.com/openeverest/openeverest/issues/2471
 
 ---
@@ -11,6 +11,10 @@
 ## 1. Summary
 
 Enable data import functionality in OpenEverest v2 by extending the Instance CR and BackupClass CR to support initial data population from external sources. Instead of creating separate DataImporter/DataImportJob CRs (as in v1), treat data imports as instance initialization operations — allowing users to create a new database Instance with pre-populated data by specifying an external data source during Instance creation.
+
+Data import supports two execution modes:
+- **ProviderManaged**: The provider creates operator-native restore CRs (e.g., `PerconaServerMongoDBRestore`) that leverage the in-cluster backup agent (PBM, pgBackRest). This is the recommended approach when the provider's backup agent already supports the import format.
+- **Job**: An external Kubernetes Job connects directly to the database and imports data using tools like `mongorestore`, `pg_restore`, or `mysql`. This is useful for formats not supported by the provider's backup agent.
 
 ## 2. Motivation
 
@@ -25,24 +29,31 @@ This creates:
 - **API surface bloat**: Additional RBAC resources (`data-importers`, `data-import-jobs`) and distinct lifecycle management
 - **Inconsistent UX**: Different concepts for "restore from backup" vs "import from external source" despite similar underlying operations
 
+Additionally, the v1 implementation uses a "Job-wrapped ProviderManaged" pattern where the Job merely creates a `PerconaServerMongoDBRestore` CR and waits for it. The Job is not performing the actual import; it's delegating to the operator's restore mechanism.
+
 ### Why Change?
 
-A data import is conceptually an **instance initialization operation** where a new instance is created and populated with data from an external source. The v2 BackupClass architecture with `ExecutionMode=Job` already provides:
-- Job execution with custom images/commands
-- RBAC permission management
-- Payload secret creation and mounting
-- Status observation and lifecycle management
-- OpenAPI schema validation for configuration
+A data import is conceptually an **instance initialization operation** where a new instance is created and populated with data from an external source.
 
-By extending the Instance CR and BackupClass CR to support initial data sources, we can reuse this infrastructure while maintaining the correct semantic: creating a new instance with initial data.
+The v2 design recognizes that there are two distinct implementation strategies:
+
+1. **ProviderManaged Import**: When the provider's backup agent (PBM, pgBackRest, Barman) can already restore from the external format, the provider should directly create the operator-native restore CR. No Job wrapper is needed. This is cleaner, more efficient, and correctly represents what's happening.
+
+2. **Job Import**: When an external tool is needed to connect to the database and import data directly (e.g., `mongoimport` for JSON files, `psql` for SQL dumps), a Kubernetes Job is appropriate. The Job genuinely performs the work.
+
+By supporting both modes explicitly, we:
+- Avoid the confusion of a "Job" that just creates another CR
+- Enable true Job-based imports for formats not supported by backup agents
+- Reuse the BackupClass infrastructure for configuration and validation
 
 ## 3. Goals & Non-Goals
 
 **Goals:**
 - Enable data import operations during Instance creation
-- Support multiple import methods per provider (e.g., mongorestore, mongoimport, pg_restore, psql)
+- Support both ProviderManaged and Job execution modes for imports
+- Support multiple import methods per provider (e.g., mongorestore via PBM, mongoimport via Job)
 - Reuse BackupStorage CRs for S3 credentials and endpoint configuration
-- Reuse BackupClass CR infrastructure for import job execution
+- Reuse BackupClass CR infrastructure for import configuration and validation
 - Eliminate the need for separate DataImporter/DataImportJob CRs
 
 **Non-Goals:**
@@ -54,6 +65,10 @@ By extending the Instance CR and BackupClass CR to support initial data sources,
 
 ### 4.1 Architecture Overview
 
+#### 4.1.1 ProviderManaged Import Flow
+
+When `BackupClass.spec.executionMode=ProviderManaged` and `spec.providerManaged.supportsImport=true`:
+
 ```mermaid
 graph TD
     User[User] --> Instance[Create Instance CR]
@@ -62,10 +77,31 @@ graph TD
     Check -->|Yes| CreateDBImport[Create DB Resources]
     CreateDB --> EmptyReady[Instance Ready]
     CreateDBImport --> WaitHealthy[Wait for Instance Healthy]
-    WaitHealthy --> ResolveBC[Resolve BackupClass and Validate Config]
-    ResolveBC --> FetchS3[Fetch S3 Creds from BackupStorage]
-    FetchS3 --> FetchDB[Fetch DB Creds from connectionSecretRef]
-    FetchDB --> PayloadSecret[Create Payload Secret]
+    WaitHealthy --> ResolveBC[Resolve BackupClass]
+    ResolveBC --> CheckMode{ExecutionMode?}
+    CheckMode -->|ProviderManaged| CreateRestore[Provider creates operator-native restore CR]
+    CreateRestore --> WaitRestore[Wait for restore to complete]
+    WaitRestore --> RestoreDone{Restore Status?}
+    RestoreDone -->|Succeeded| DataReady[Instance Ready with Data]
+    RestoreDone -->|Failed| ImportFailed[Import Failed]
+```
+
+#### 4.1.2 Job Import Flow
+
+When `BackupClass.spec.executionMode=Job` and `spec.importJob` is set:
+
+```mermaid
+graph TD
+    User[User] --> Instance[Create Instance CR]
+    Instance --> Check{dataSource.type = External?}
+    Check -->|No| CreateDB[Create DB Resources]
+    Check -->|Yes| CreateDBImport[Create DB Resources]
+    CreateDB --> EmptyReady[Instance Ready]
+    CreateDBImport --> WaitHealthy[Wait for Instance Healthy]
+    WaitHealthy --> ResolveBC[Resolve BackupClass]
+    ResolveBC --> CheckMode{ExecutionMode?}
+    CheckMode -->|Job| FetchCreds[Fetch S3 + DB Credentials]
+    FetchCreds --> PayloadSecret[Create Payload Secret]
     PayloadSecret --> CreateJob[Create Import Job - phase = Restoring]
     CreateJob --> JobDone{Job Status?}
     JobDone -->|Succeeded| DataReady[Instance Ready with Data]
@@ -140,7 +176,7 @@ type DataSourceExternal struct {
 
 **File:** `api/backup/v1alpha1/backupclass_types.go`
 
-Add import-specific fields (this part remains the same):
+BackupClass supports import through both execution modes:
 
 ```go
 type BackupClassSpec struct {
@@ -151,52 +187,66 @@ type BackupClassSpec struct {
     ProviderManaged     *ProviderManagedSpec           `json:"providerManaged,omitempty"`
     Config              BackupClassConfig              `json:"config,omitempty"`
     RestoreConfig       BackupClassConfig              `json:"restoreConfig,omitempty"`
-    ImportConfig        BackupClassConfig              `json:"importConfig,omitempty"`  // NEW
+    ImportConfig        BackupClassConfig              `json:"importConfig,omitempty"`  // NEW - used by both modes
     InstanceConstraints BackupClassInstanceConstraints `json:"instanceConstraints,omitempty"`
     UISchema            *runtime.RawExtension          `json:"uiSchema,omitempty"`
     Job                 *JobModeSpec                   `json:"job,omitempty"`
     // ImportJob describes the job spawned to perform an initial data import
     // when an Instance is created with spec.dataSource.type=External.
-    //
-    // ImportJob is intentionally a top-level sibling of Job rather than a
-    // field on JobModeSpec: JobModeSpec.Backup is required, so a
-    // BackupClass that exists purely as an import method (no backup/restore
-    // capability.
-    ImportJob            *JobExecution                  `json:"importJob,omitempty"`  // NEW
+    // Only used when executionMode=Job.
+    ImportJob           *JobExecution                  `json:"importJob,omitempty"`
+}
+
+// ProviderManagedSpec carries configuration for ExecutionMode="ProviderManaged".
+type ProviderManagedSpec struct {
+    SupportsPITR bool `json:"supportsPITR,omitempty"`
+    Limits       *BackupClassLimits `json:"limits,omitempty"`
+    PITRConfigSchema *runtime.RawExtension `json:"pitrConfigSchema,omitempty"`
+
+    // SupportsImport indicates whether this ProviderManaged class supports
+    // importing from external data sources. When true, the provider handles
+    // Instance.spec.dataSource.type=External by creating operator-native
+    // restore resources (e.g., PerconaServerMongoDBRestore). The import
+    // configuration is validated against ImportConfig.openAPIV3Schema.
+    // +optional
+    SupportsImport bool `json:"supportsImport,omitempty"`  // NEW
+}
 ```
 
-**Validation:** The existing CEL rules on `BackupClassSpec` (`spec.job` required/allowed only when `executionMode=Job`, etc.) need adjusting so that a class satisfies the "executionMode=Job requires an execution definition" rule via *either* `job` or `importJob`.
+**Validation Rules:**
+
+- When `executionMode=ProviderManaged` and `providerManaged.supportsImport=true`:
+  - `importConfig` should be set to define the import configuration schema
+  - Provider handles import by creating operator-native restore CRs
+
+- When `executionMode=Job` and `importJob` is set:
+  - `importConfig` should be set to define the import configuration schema
+  - Runtime spawns the specified Job to perform the import
+
+- A BackupClass can support backup/restore AND import, or just one of them:
+  - ProviderManaged class with `supportsImport=true` can do both backup and import
+  - Job class with only `importJob` (no `job.backup`) is import-only
 
 **How to Define Import UI Schema:**
 
-The import form UI schema is defined in the BackupClass definition under `definition/backupclasses/<name>/`. This controls how the import config fields (path, credentialsSecretName, etc.) are rendered in the create instance wizard.
+The import form UI schema is defined in the BackupClass definition under `definition/backupclasses/<name>/`.
+For the default `percona-backup-mongodb` class, the import UI is simple since PBM handles most details.
 
-```
-definition/
-  backupclasses/
-    data-import/
-      class.yaml        # BackupClass metadata and config schema
-      ui.yaml           # UI rendering hints for import form
-      types.go          # Go types for importConfig schema
-```
-
-**ui.yaml:**
-
-Below is an example, it may change.
+**ui.yaml (for ProviderManaged import):**
 
 ```yaml
-# definition/backupclasses/data-import/ui.yaml
+# definition/backupclasses/percona-backup-mongodb/ui.yaml (import section)
 import:
   sections:
     source:
-      label: "Import information"
+      label: "Import Source"
       components:
         storageName:
           uiType: select
           path: "dataSource.external.storageName"
           fieldParams:
-            label: "Provide S3 details"
-            helperText: "S3 storage containing the data to import"
+            label: "S3 Storage"
+            helperText: "S3 storage containing the PBM/mongodump backup"
           dataSource:
             provider: backupStorages
           validation:
@@ -205,27 +255,100 @@ import:
           uiType: text
           path: "dataSource.external.config.path"
           fieldParams:
-            label: "File Directory"
-            placeholder: "/backups/dump"
-            helperText: "Path to the mongodump directory in the S3 bucket"
+            label: "Backup Path"
+            placeholder: "backups/2026-07-15/my-cluster"
+            helperText: "Path to the backup directory in the S3 bucket"
           validation:
             required: true
-        credentials:
-          label: "DB credentials"
-          components:
-            credentialsSecretName:
-              uiType: secret
-              path: "dataSource.external.config.credentialsSecretName"
-              fieldParams:
-                label: "Credentials Secret"
-                secretDefinition: data-import-credentials  # References definition/secrets/data-import-credentials/
-                createLabel: "+ Create New Credentials"
-                helperText: "Secret containing MongoDB user credentials for the import"
-              dataSource:
-                provider: secrets
-                category: data-import-credentials
-              validation:
-                required: true
+    credentials:
+      label: "Source Database Credentials"
+      description: "PBM backups embed credential hashes. You must provide the credentials from the source database."
+      components:
+        credentialsSecretName:
+          uiType: secret
+          path: "dataSource.external.config.credentialsSecretName"
+          fieldParams:
+            label: "Credentials Secret"
+            secretDefinition: psmdb-users
+            createLabel: "+ Create New Credentials"
+            helperText: "Secret containing MongoDB credentials from the source database"
+          dataSource:
+            provider: secrets
+            category: psmdb-users
+          validation:
+            required: true
+```
+
+**Why are credentials required for ProviderManaged import?**
+
+PBM backups embed credential hashes. When restored, the target database must have matching
+credentials or authentication will fail. The provider copies the user-provided credentials
+to the target Instance's users secret before starting the restore.
+
+**ui.yaml (for Job-mode import - e.g., mongoimport):**
+
+Job-mode imports also require database credentials since the Job connects directly:
+
+```yaml
+# definition/backupclasses/data-importer/ui.yaml
+import:
+  sections:
+    source:
+      label: "Import Source"
+      components:
+        storageName:
+          uiType: select
+          path: "dataSource.external.storageName"
+          fieldParams:
+            label: "S3 Storage"
+            helperText: "S3 storage containing the JSON/CSV file"
+          dataSource:
+            provider: backupStorages
+          validation:
+            required: true
+        path:
+          uiType: text
+          path: "dataSource.external.config.path"
+          fieldParams:
+            label: "File Path"
+            placeholder: "imports/data.json"
+            helperText: "Path to the JSON/CSV file in the S3 bucket"
+          validation:
+            required: true
+    target:
+      label: "Import Target"
+      components:
+        collection:
+          uiType: text
+          path: "dataSource.external.config.collection"
+          fieldParams:
+            label: "Collection Name"
+            helperText: "Target MongoDB collection"
+          validation:
+            required: true
+        database:
+          uiType: text
+          path: "dataSource.external.config.database"
+          fieldParams:
+            label: "Database Name"
+            placeholder: "admin"
+            helperText: "Target database (defaults to admin)"
+    credentials:
+      label: "DB Credentials"
+      components:
+        credentialsSecretName:
+          uiType: secret
+          path: "dataSource.external.config.credentialsSecretName"
+          fieldParams:
+            label: "Credentials Secret"
+            secretDefinition: data-import-credentials
+            createLabel: "+ Create New Credentials"
+            helperText: "Secret containing MongoDB credentials for direct connection"
+          dataSource:
+            provider: secrets
+            category: data-import-credentials
+          validation:
+            required: true
 ```
 
 **Fetching import UI schema:**
@@ -237,43 +360,32 @@ The import UI schema is fetched from the BackupClass:
 ```json
 {
   "metadata": {
-    "name": "psmdb-mongorestore-import"
+    "name": "percona-backup-mongodb"
   },
   "spec": {
-    "displayName": "Import information",
-    "importConfig": {
-      "openAPIV3Schema": { ... }
+    "displayName": "Percona Backup for MongoDB",
+    "executionMode": "ProviderManaged",
+    "providerManaged": {
+      "supportsPITR": true,
+      "supportsImport": true
     },
-    "importJob": { ... },
+    "importConfig": {
+      "openAPIV3Schema": {
+        "type": "object",
+        "required": ["path"],
+        "properties": {
+          "path": {"type": "string"}
+        }
+      }
+    },
     "uiSchema": {
       "import": {
         "sections": {
           "source": {
-            "label": "Provide S3 details",
+            "label": "Import Source",
             "components": {
+              "storageName": { ... },
               "path": { ... }
-            }
-          },
-          "credentials": {
-            "label": "DB credentials",
-            "components": {
-              "credentialsSecretName": {
-                "uiType": "secret",
-                "path": "dataSource.external.config.credentialsSecretName",
-                "fieldParams": {
-                  "label": "Credentials Secret",
-                  "secretDefinition": "data-import-credentials",
-                  "createLabel": "+ Create New Credentials",
-                  "helperText": "Secret containing MongoDB user credentials for the import"
-                },
-                "dataSource": {
-                  "provider": "secrets",
-                  "category": "data-import-credentials"
-                },
-                "validation": {
-                  "required": true
-                }
-              }
             }
           }
         }
@@ -283,11 +395,14 @@ The import UI schema is fetched from the BackupClass:
 }
 ```
 
-The UI uses `uiSchema.import` to render the import form, and `fieldParams.secretDefinition` in the `credentialsSecretName` determines which secret UI schema to use for the "Create New" modal.
+The UI uses `uiSchema.import` to render the import form. For Job-mode classes that require credentials,
+`fieldParams.secretDefinition` determines which secret UI schema to use for the "Create New" modal.
 
-**How to Define Import Secret Schema:**
+**How to Define Import Secret Schema (Job-mode only):**
 
-Import credentials are defined using the **Secret Management** infrastructure (see Secret Management spec). The provider declares a secret definition under `definition/secrets/<secret>/`:
+Job-mode imports require database credentials since the Job connects directly. These credentials are
+defined using the **Secret Management** infrastructure. The provider declares a secret definition
+under `definition/secrets/<secret>/`:
 
 ```
 definition/
@@ -297,6 +412,9 @@ definition/
       ui.yaml          # UI rendering hints
       types.go         # Go types for schema validation
 ```
+
+Note: ProviderManaged imports do NOT require a separate credentials secret because PBM runs
+inside the cluster with access to the database.
 
 **secret.yaml:**
 ```yaml
@@ -422,54 +540,201 @@ The secret UI schema defined in `ui.yaml` are set in provider spec.
 
 ### 4.3 Example: Import Methods
 
-Each import method gets its own BackupClass.
+ProviderManaged import capability is added to the **default backup class** shipped with the provider,
+rather than creating a separate import-only class. This provides a simpler mental model: one class
+does backup, restore, AND import using the same underlying tool (PBM).
 
-The default `importer` binary will be shipped inside the `provider-percona-server-mongodb` provider image,
-as it was in v1.
-It reads the mounted `request.json` payload, creates a `PerconaServerMongoDBRestore` CR against the Kubernetes API, and waits for the restore to reach a terminal state before exiting.
-See https://github.com/openeverest/openeverest-operator/blob/main/internal/data-importer/cmd/psmdb/import.go.
+Job-mode import (e.g., mongoimport for JSON/CSV) would be in a **separate class** because it uses
+different tooling with different configuration requirements.
 
-#### BackupClass:
+#### 4.3.1 Default BackupClass with ProviderManaged Import (Recommended)
+
+The default `percona-backup-mongodb` BackupClass is extended to support import:
+
+**BackupClass (definition/backupclasses/percona-backup-mongodb/class.yaml):**
 
 ```yaml
-apiVersion: backup.openeverest.io/v1alpha1
-kind: BackupClass
-metadata:
-  name: psmdb-mongorestore-import
-spec:
-  displayName: "MongoDB Import"
-  description: "Import BSON dumps created by mongodump"
-  supportedProviders: [percona-server-mongodb]
-  executionMode: Job
+displayName: "Percona Backup for MongoDB"
+description: |
+  BackupClass for the Percona Server MongoDB provider. Backups, restores,
+  and external data imports are managed natively by Percona Backup for
+  MongoDB (PBM) embedded in the PSMDB operator; OpenEverest does not run
+  any side-car Job for this class.
+supportedProviders:
+  - percona-server-mongodb
+executionMode: ProviderManaged
 
-  importConfig:
-    openAPIV3Schema:
-      type: object
-      required:
-        - path
-        - credentialsSecretName
-      properties:
-        path:
-          type: string
-          description: "S3 path to import file/directory. For mongorestore, point to a directory containing BSON dump files. For mongoimport, point to a single JSON/CSV/TSV file."
-        credentialsSecretName:
-          type: string
-          description: "Name of a managed Secret containing database credentials."
+providerManaged:
+  supportsPITR: true
+  supportsImport: true  # This class supports external data import
+  limits:
+    maxPITREnabledStorages: 1
+    maxStorages: 1
+  pitrConfigSchema: PerconaPITRConfig
 
-  importJob:
-    jobSpec:
-      image: percona/provider-percona-server-mongodb:0.1.0
-      command: ["/importer", "psmdb"]
-    permissions:
-      - apiGroups: [""]
-        resources: [secrets]
-        verbs: [get, create, update, delete]
-      - apiGroups: ["psmdb.percona.com"]
-        resources: [perconaservermongodbrestores]
-        verbs: [get, create, update]
+config:
+  openAPIV3Schema: PerconaBackupConfig
+
+restoreConfig:
+  openAPIV3Schema: PerconaRestoreConfig
+
+# Import config - requires credentials because PBM backups embed password hashes
+importConfig:
+  openAPIV3Schema: PerconaImportConfig
 ```
 
-### 4.4 Example: End-to-End Import Workflow
+**Import Config Type (definition/backupclasses/percona-backup-mongodb/types.go):**
+
+```go
+// PerconaImportConfig describes the configuration accepted when an Instance
+// is created with spec.dataSource.type=External referencing this BackupClass.
+//
+// IMPORTANT: PBM/mongodump backups embed credential hashes. When restoring,
+// the target cluster's users secret MUST contain the same credentials as the
+// source cluster that created the backup. Mismatched credentials render the
+// restored data inaccessible because MongoDB will reject authentication
+// attempts with the wrong password hashes.
+type PerconaImportConfig struct {
+    // Path is the S3 path (prefix) where the PBM/mongodump backup data resides.
+    // +kubebuilder:validation:Required
+    Path string `json:"path"`
+
+    // CredentialsSecretName is the name of a Secret containing the MongoDB
+    // credentials from the source database. REQUIRED because PBM backups
+    // embed password hashes - the target Instance must use the same
+    // credentials to access the restored data.
+    //
+    // The Secret must contain the standard PSMDB users secret keys:
+    //   - MONGODB_BACKUP_USER / MONGODB_BACKUP_PASSWORD
+    //   - MONGODB_CLUSTER_ADMIN_USER / MONGODB_CLUSTER_ADMIN_PASSWORD
+    //   - MONGODB_DATABASE_ADMIN_USER / MONGODB_DATABASE_ADMIN_PASSWORD
+    //   - etc.
+    // +kubebuilder:validation:Required
+    CredentialsSecretName string `json:"credentialsSecretName"`
+}
+```
+
+**Why are credentials required for ProviderManaged import?**
+
+PBM (Percona Backup for MongoDB) backups embed credential hashes. When MongoDB restores from
+such a backup, it replaces the current user data with the backup's user data - including the
+password hashes. If the target Instance was initialized with different credentials, those
+credentials become invalid after the restore completes.
+
+The provider handles this by:
+1. Reading the user-provided credentials secret
+2. Copying it to the target Instance's users secret BEFORE creating the PSMDB CR
+3. This ensures the operator never initializes the secret with random passwords
+
+**Why same class?**
+- PBM handles backup, restore, AND import from PBM-compatible sources
+- Simpler mental model: one class for all PBM operations
+- No config duplication (S3 storage config, supported providers, constraints)
+- Natural extension: BackupClass already has Config, RestoreConfig → adding ImportConfig fits
+
+**How the provider handles this:**
+
+The provider's `SyncPSMDB` function detects `Instance.spec.dataSource.type=External`, checks that
+the BackupClass has `providerManaged.supportsImport=true`, copies credentials, and creates a
+`PerconaServerMongoDBRestore` CR:
+
+```go
+// In provider/import.go - reconcileProviderManagedImport
+func reconcileProviderManagedImport(c *controller.Context, ext *DataSourceExternal, importCfg ImportConfig) error {
+    // CRITICAL: Copy source database credentials to the target Instance's users
+    // secret BEFORE creating the PSMDB CR. PBM backups embed credential hashes;
+    // mismatched secrets render the restored data inaccessible.
+    usersSecretName := c.Name() + "-users"
+    if err := ensureImportCredentials(c, usersSecretName, importCfg.CredentialsSecretName); err != nil {
+        return err
+    }
+
+    storage, _ := c.BackupStorage(ext.StorageName)
+
+    // Create PerconaServerMongoDBRestore CR directly (no Job wrapper)
+    psmdbRestore := &psmdbv1.PerconaServerMongoDBRestore{
+        ObjectMeta: metav1.ObjectMeta{
+            Name:      c.Name() + "-import",
+            Namespace: c.Namespace(),
+        },
+        Spec: psmdbv1.PerconaServerMongoDBRestoreSpec{
+            ClusterName: c.Name(),
+            BackupSource: &psmdbv1.PerconaServerMongoDBBackupStatus{
+                Type:        pbmdefs.LogicalBackup,
+                Destination: fmt.Sprintf("s3://%s/%s", storage.Spec.S3.Bucket, importCfg.Path),
+                S3: &psmdbv1.BackupStorageS3Spec{...},
+            },
+        },
+    }
+    return c.Client().Create(c.Context(), psmdbRestore)
+}
+```
+
+#### 4.3.2 Separate Job-mode BackupClass (For formats not supported by PBM)
+
+When an external tool must connect to the database directly (e.g., `mongoimport` for JSON/CSV),
+a **separate BackupClass** is created with `executionMode=Job`. The Job genuinely performs the
+import work.
+
+**Why separate class?**
+- Different execution mode (Job vs ProviderManaged)
+- Different config requirements (needs collection name, database, file format)
+- Different capabilities (import-only, no backup/restore)
+- Uses different tooling (mongoimport vs PBM)
+
+**BackupClass (definition/backupclasses/data-importer/class.yaml):**
+
+```yaml
+displayName: "MongoDB JSON/CSV Import"
+description: |
+  BackupClass for importing JSON or CSV files into a Percona Server for MongoDB
+  instance using mongoimport. Use this when the source data is NOT a PBM/mongodump
+  backup.
+supportedProviders:
+  - percona-server-mongodb
+executionMode: Job
+
+importConfig:
+  openAPIV3Schema: MongoimportConfig
+
+# NOTE: importJob implementation is TODO
+# importJob:
+#   jobSpec:
+#     image: "percona/everest-mongoimport:latest"
+#     command: ["/mongoimport-wrapper", "/payload/request.json"]
+```
+
+**Import Config Type (definition/backupclasses/data-importer/types.go):**
+
+```go
+// MongoimportConfig describes the configuration for mongoimport-based imports.
+type MongoimportConfig struct {
+    // Path is the S3 path to the JSON or CSV file to import.
+    // +kubebuilder:validation:Required
+    Path string `json:"path"`
+
+    // CredentialsSecretName is required because mongoimport connects directly.
+    // +kubebuilder:validation:Required
+    CredentialsSecretName string `json:"credentialsSecretName"`
+
+    // Collection is the target MongoDB collection name.
+    // +kubebuilder:validation:Required
+    Collection string `json:"collection"`
+
+    // Database is the target database name. Defaults to "admin".
+    // +optional
+    Database string `json:"database,omitempty"`
+
+    // Type specifies the input file format.
+    // +kubebuilder:validation:Enum=json;csv;tsv
+    // +kubebuilder:default=json
+    Type string `json:"type,omitempty"`
+}
+```
+
+### 4.4 Example: End-to-End Import Workflow (ProviderManaged)
+
+This example shows importing a PBM/mongodump backup using the default ProviderManaged BackupClass.
 
 #### Step 1: Create BackupStorage (S3 credentials)
 
@@ -490,47 +755,34 @@ spec:
 
 #### Step 2: Create Database Credentials Secret
 
-The import job requires database credentials to connect to the Instance. Users create a Secret via the **Secret Management API** with proper labels:
+For ProviderManaged import (PBM/mongodump), you MUST provide the **same MongoDB credentials**
+as the source database. This is critical because PBM backups embed credential hashes in the
+restored data—if the target cluster has different credentials, the restored authentication
+data will be inconsistent and users won't be able to authenticate.
 
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: source-db-credentials
+  namespace: production
+type: Opaque
+stringData:
+  # These must match the source database credentials EXACTLY
+  MONGODB_BACKUP_USER: pbmuser
+  MONGODB_BACKUP_PASSWORD: <source-backup-password>
+  MONGODB_CLUSTER_ADMIN_USER: clusterAdmin
+  MONGODB_CLUSTER_ADMIN_PASSWORD: <source-admin-password>
+  MONGODB_CLUSTER_MONITOR_USER: clusterMonitor
+  MONGODB_CLUSTER_MONITOR_PASSWORD: <source-monitor-password>
+  MONGODB_USER_ADMIN_USER: userAdmin
+  MONGODB_USER_ADMIN_PASSWORD: <source-useradmin-password>
 ```
-POST /clusters/{cluster}/namespaces/production/secrets
-```
-
-```json
-{
-  "apiVersion": "v1",
-  "kind": "Secret",
-  "metadata": {
-    "name": "my-mongo-cluster-import-creds",
-    "namespace": "production",
-    "labels": {
-      "openeverest.io/provider": "percona-server-mongodb",
-      "openeverest.io/category": "data-import-credentials"
-    }
-  },
-  "type": "Opaque",
-  "stringData": {
-    "MONGODB_BACKUP_USER": "backup",
-    "MONGODB_BACKUP_PASSWORD": "<secure-password>",
-    "MONGODB_CLUSTER_ADMIN_USER": "clusterAdmin",
-    "MONGODB_CLUSTER_ADMIN_PASSWORD": "<secure-password>",
-    "MONGODB_CLUSTER_MONITOR_USER": "clusterMonitor",
-    "MONGODB_CLUSTER_MONITOR_PASSWORD": "<secure-password>",
-    "MONGODB_DATABASE_ADMIN_USER": "databaseAdmin",
-    "MONGODB_DATABASE_ADMIN_PASSWORD": "<secure-password>",
-    "MONGODB_USER_ADMIN_PASSWORD": "<secure-password>"
-  }
-}
-```
-
-The API server adds the `openeverest.io/managed: "true"` label automatically.
-
-> **Note:** The required credential keys are defined by the provider's secret definition at `definition/secrets/data-import-credentials/`. The UI renders a creation form based on the `ui.yaml` in that directory. The schema in `types.go` is used for validation.
 
 #### Step 3: Create Instance with DataSource
 
 ```yaml
-apiVersion: instance.openeverest.io/v1alpha1
+apiVersion: core.openeverest.io/v1alpha1
 kind: Instance
 metadata:
   name: my-mongo-cluster
@@ -538,6 +790,9 @@ metadata:
 spec:
   provider: percona-server-mongodb
   topology: replica-set
+  components:
+    engine:
+      replicas: 3
   resources:
     cpu: "2"
     memory: 4Gi
@@ -545,65 +800,62 @@ spec:
     size: 50Gi
     class: standard
 
+  # Use the default PBM BackupClass for ProviderManaged import
   dataSource:
     type: External
     external:
-      backupClassName: psmdb-mongoimport-import
+      backupClassName: percona-backup-mongodb  # Default BackupClass with supportsImport=true
       storageName: s3-external-data
       config:
-        path: /imports/users.json
-        credentialsSecretName: my-mongo-cluster-import-creds
+        path: backups/2026-07-15/source-cluster   # Path to PBM/mongodump backup in S3
+        credentialsSecretName: source-db-credentials  # REQUIRED: source database credentials
 ```
 
-#### Step 4: Controller Creates Instance and Import Job
+#### Step 4: Controller Creates Instance and Handles Import
 
-The Instance controller:
+The Instance controller (ProviderManaged flow):
+
 1. Creates the database instance as normal (StatefulSet, Services, etc.)
-2. Waits for the instance to become healthy
-3. Once healthy, resolves the `psmdb-mongoimport-import` BackupClass from `dataSource.external.backupClassName`
-4. Validates `dataSource.external.config` against `BackupClass.spec.importConfig.openAPIV3Schema`
-5. Extracts `dataSource.external.config.path` and `dataSource.external.config.credentialsSecretName`
-6. Validates that the Secret named by `dataSource.external.config.credentialsSecretName`:
-   - Has label `openeverest.io/managed: "true"`
-   - Has label `openeverest.io/category` (e.g., `data-import-credentials`)
-   - Validates the secret's data against the schema in `definition/secret/data-import-credentials/types.go`
+2. Waits for the instance to become healthy AND BackupVersion to be published
+3. Once ready, resolves the `percona-backup-mongodb` BackupClass from `dataSource.external.backupClassName`
+4. Validates the BackupClass has `providerManaged.supportsImport=true`
+5. Validates `dataSource.external.config` against `BackupClass.spec.importConfig.openAPIV3Schema`
+6. **Copies credentials from the user-provided secret to the Instance's users secret**:
+   - The provider reads the secret named by `config.credentialsSecretName`
+   - Copies credential keys to the Instance's internal users secret (e.g., `my-mongo-cluster-mongodb-users`)
+   - This ensures the PSMDB CR uses the source database credentials
 7. Fetches S3 credentials from the BackupStorage named by `dataSource.external.storageName`
-8. Reads DB connection info (host, port) from `instance.status` — populated by the provider once the instance is healthy
-9. Reads DB credentials from the user-provided Secret named by `dataSource.external.config.credentialsSecretName`
-10. Creates a payload Secret with key `request.json` containing the normalized import contract (matching the `dataimporterspec.Spec` shape from v1):
+8. Creates a `PerconaServerMongoDBRestore` CR directly (no Job wrapper):
 
-```json
-{
-  "source": {
-    "s3": {
-      "bucket": "my-data-imports",
-      "region": "us-east-1",
-      "endpointURL": "https://s3.amazonaws.com",
-      "accessKeyID": "***",
-      "secretKey": "***",
-      "verifyTLS": true,
-      "forcePathStyle": false
-    },
-    "path": "/imports/users.json"
-  },
-  "target": {
-    "databaseClusterRef": {"name": "my-mongo-cluster", "namespace": "production"},
-    "host": "my-mongo-cluster.svc",
-    "port": "27017",
-    "user": "databaseAdmin",
-    "password": "***",
-    "type": "mongodb"
-  }
-}
+```yaml
+apiVersion: psmdb.percona.com/v1
+kind: PerconaServerMongoDBRestore
+metadata:
+  name: my-mongo-cluster-import
+  namespace: production
+  annotations:
+    openeverest.io/managed-by-data-import: "true"
+  ownerReferences:
+    - apiVersion: core.openeverest.io/v1alpha1
+      kind: Instance
+      name: my-mongo-cluster
+spec:
+  clusterName: my-mongo-cluster
+  backupSource:
+    type: logical
+    destination: s3://my-data-imports/backups/2026-07-15/source-cluster
+    s3:
+      bucket: my-data-imports
+      region: us-east-1
+      endpointURL: https://s3.amazonaws.com
+      credentialsSecret: my-mongo-cluster-import-s3-creds
+      prefix: backups/2026-07-15
 ```
 
-> **Note:** The `user` and `password` in the payload are extracted from the user-provided Secret referenced in `config.credentialsSecretName`. For PSMDB, `MONGODB_DATABASE_ADMIN_USER` and `MONGODB_DATABASE_ADMIN_PASSWORD` are used.
-
-11. Creates a Kubernetes Job using `BackupClass.spec.importJob.jobSpec`, with the payload Secret mounted as a volume at `/payload/request.json`
-12. Sets `status.importJobName`, `ConditionDataSourceReady=False`, reason=`Importing`, phase=`Restoring`
-13. Observes Job until terminal:
-    - **Succeeded**: sets `ConditionDataSourceReady=True`, reason=`Succeeded`, phase=`Ready`, clears `importJobName`
-    - **Failed**: sets `ConditionDataSourceReady=False`, reason=`ImportFailed`, message=job error, phase=`Failed`
+9. Sets `ConditionDataSourceReady=False`, reason=`Restoring`, phase=`Restoring`
+10. Observes `PerconaServerMongoDBRestore` status until terminal:
+    - **Ready**: sets `ConditionDataSourceReady=True`, reason=`Succeeded`, phase=`Ready`, cleans up temp secrets
+    - **Error**: sets `ConditionDataSourceReady=False`, reason=`ImportFailed`, message=restore error, phase=`Failed`
 
 ### 4.5 UI Support
 
