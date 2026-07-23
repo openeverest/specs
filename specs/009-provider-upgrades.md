@@ -265,13 +265,14 @@ chart from `0.1` straight to a release whose bundled operator is several minors
 ahead would trigger exactly that illegal jump.
 
 We protect against this **declaratively**, with no operator-specific code in the
-framework. The provider publishes two values on the `Provider` CR (see §6.6):
+framework. The provider publishes two values on the `Provider` CR, grouped under
+`spec.release` — the identity of the shipped unit (see §6.6):
 
-- `spec.providerVersion` (**P**) — the provider version, populated from the chart
-  `appVersion`.
-- `spec.minUpgradableFrom` — the lowest provider version from which a one-step
-  upgrade *to* this version is allowed. The author sets it so each permitted step
-  moves the bundled operator within its own legal range.
+- `spec.release.version` (**P**) — the provider release version, populated from
+  the chart `appVersion`.
+- `spec.release.minUpgradableFrom` — the lowest provider release version from
+  which a one-step upgrade *to* this release is allowed. The author sets it so
+  each permitted step moves the bundled operator within its own legal range.
 
 The pre-upgrade hook reads the currently-installed `Provider` CR (current **P**)
 and the target **P** + `minUpgradableFrom` carried by the new chart; it **blocks**
@@ -388,22 +389,34 @@ type ComponentVersion struct {
 ```
 
 **Provider upgrade-path fields (R2).** The `Provider` CR also carries the
-provider version and the one-step floor:
+provider release version and the one-step floor, grouped under `spec.release`
+(the identity of the shipped unit — avoids repeating the kind in a
+`providerVersion` field and leaves room for future upgrade-path metadata such
+as a skip range):
 
 ```go
 type ProviderSpec struct {
     // ... existing fields ...
 
-    // ProviderVersion is the provider version (P), from the chart appVersion
-    // (e.g. "0.3"). Read by the pre-upgrade hook to validate upgrade paths.
-    // Named distinctly from .versions[] (the engine bundle catalog).
+    // Release identifies this provider release — the shipped unit of
+    // controller, bundled operator, and version catalog — and its
+    // upgrade-path constraints. It is read by the pre-upgrade preflight.
     // +optional
-    ProviderVersion string `json:"providerVersion,omitempty"`
+    Release *Release `json:"release,omitempty"`
+}
 
-    // MinUpgradableFrom is the lowest provider version from which a single-step
-    // upgrade to this version is permitted; a lower installed version is blocked
-    // and must step through intermediate releases (generalizes PSMDB's one-minor
-    // rule). Empty means no floor.
+// Release identifies a provider release and its upgrade-path constraints.
+type Release struct {
+    // Version is the provider release version (P), populated from the chart
+    // appVersion (e.g. "0.3"). Named distinctly from ProviderSpec.Versions
+    // (the engine bundle catalog).
+    // +optional
+    Version string `json:"version,omitempty"`
+
+    // MinUpgradableFrom is the lowest provider release version from which a
+    // single-step upgrade to this release is permitted; a lower installed
+    // version is blocked and must step through intermediate releases
+    // (generalizes PSMDB's one-minor rule). Empty means no floor.
     // +optional
     MinUpgradableFrom string `json:"minUpgradableFrom,omitempty"`
 }
