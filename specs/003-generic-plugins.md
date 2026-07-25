@@ -228,6 +228,17 @@ plugin's Helm chart and applied at install time (see §10.7). Trust is anchored
 at the plugin hub: signed/curated bundles get installed; everything else is
 rejected at install time.
 
+#### Canonical name
+
+`metadata.name` is the plugin's canonical identity. It is referenced as a
+global key by the proxy path (`/v1/plugins/{name}/...`), Everest RBAC
+(`plugin/<name>`, §11.2), frontend extension-point routes (`/plugins/{name}`),
+`InstalledExtension.spec.pluginName`, the CLI subcommand, and the API group
+of any `customResources` (`<name>.plugins.openeverest.io`, §10.8). It must
+equal the chart's identity — see §10.7 for the chart-side rule. The host
+rejects `Plugin` CRs whose name does not match `^[a-z][a-z0-9-]{0,62}$` or
+whose name collides with an existing `Plugin` CR.
+
 ### 7.2 `InstalledExtension` (cluster-scoped)
 
 A single cluster-scoped CR records the install state of an extension — either
@@ -597,6 +608,31 @@ proxysql-plugin/
 ```
 
 The chart author decides scope: a single `ClusterRole` + `ClusterRoleBinding` for a cluster-wide plugin, or a `Role` + `RoleBinding` per target namespace. The chart is the single source of truth.
+
+#### Plugin CR naming
+
+The `Plugin` and `InstalledExtension` CRs are cluster-scoped singletons keyed by the plugin's canonical id (§7.1). The chart **must** pin their `metadata.name` to `{{ .Chart.Name }}` — never `{{ .Release.Name }}` or `{{ include "chart.fullname" . }}`. Namespaced resources (Deployment, Service, ServiceAccount, RoleBinding, ConfigMap) may still use the release name; their names are not load-bearing.
+
+```yaml
+# templates/plugin.yaml
+apiVersion: extensions.openeverest.io/v1alpha1
+kind: Plugin
+metadata:
+  name: {{ .Chart.Name }}            # canonical, not .Release.Name
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  # ...
+```
+
+Consequences:
+
+- Installing the same chart twice under different release names fails on the second install (`Plugin` CR already exists). This is intentional: two installs would race for the same `/v1/plugins/{name}` route, RBAC resource, and CRD group.
+- Hub vetting rejects charts whose `Plugin` / `InstalledExtension` templates do not pin `metadata.name` to `.Chart.Name`.
+- `everestctl extension install` enforces the same rule on the rendered manifest before applying, covering the raw-`helm install` and GitOps paths via the hub-vetting gate and covering the CLI path directly.
 
 #### Lifecycle integration — ProxySQL example
 
