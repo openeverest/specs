@@ -232,30 +232,40 @@ If the secret was found, but does not contain the label `"openeverest.io/managed
       "replicaSet": { ... },
       "sharded": { ... },
     },
-    "secrets":{
-      "splithorizon-tls": { // Use this for definition
-        "uiSchema": { 
-          // UI schema for split horizon
-          "sections": {
-            "certificate": {
-              "label": "TLS Certificate",
-              "components": {}
+    "secrets": {
+      "splithorizon-tls": {
+        "parametersSchema": {
+          "openAPIV3Schema": {
+            "type": "object",
+            "properties": {
+              "tls.crt": { "type": "string" },
+              "tls.key": { "type": "string" }
             }
           }
         },
-        "openAPIV3Schema": {
-          "properties": {
-            "tls.crt": "string",
-            "tls.key": "string"
-          },
-          "type": "object"
-        },
+        "uiSchema": { 
+          // UI schema for split horizon
+          "label": "TLS Certificate",
+          "componentsOrder": ["tlsCrt", "tlsKey"],
+          "components": { ... }
+        }
       },
-      "data-importer-credentials": {
+      "data-import-credentials": {
+        "parametersSchema": {
+          "openAPIV3Schema": { ... }
+        },
         "uiSchema": {
           // UI schema for data importer credentials
+        }
+      }
+    },
+    "configMaps": {
+      "custom-mongod": {
+        "parametersSchema": {
+          "openAPIV3Schema": { ... }
         },
-        "openAPIV3Schema": {
+        "uiSchema": {
+          // UI schema for custom mongod configuration
         }
       }
     }
@@ -406,52 +416,49 @@ Providers define Secret and ConfigMap types in separate definition files, simila
 definition/
   secrets/
     splithorizon-tls/
-      secret.yaml      # Metadata and schema reference
+      definition.yaml  # Schema configuration
       ui.yaml          # UI rendering hints
       types.go         # Go types for schema validation
-  config-maps/
+  configmaps/
     custom-mongod/
-      config-map.yaml   # Metadata and schema reference
+      definition.yaml  # Schema configuration
       ui.yaml          # UI rendering hints
       types.go         # Go types for schema validation
 ```
 
 #### Secret Definition
 
-**secret.yaml:**
+**definition.yaml:**
 ```yaml
-# definition/secrets/splithorizon-tls/secret.yaml
-displayName: "TLS Certificate"
-description: "TLS certificate for split horizon DNS"
-definition: splithorizon-tls
-
-config:
+# definition/secrets/splithorizon-tls/definition.yaml
+parametersSchema:
   openAPIV3Schema: SplitHorizonTLSConfig
 ```
 
 **ui.yaml:**
 ```yaml
 # definition/secrets/splithorizon-tls/ui.yaml
-sections:
-  certificate:
-    label: "TLS Certificate"
-    components:
-      tlsCrt:
-        uiType: file # Not supported yet
-        path: "data.tls\\.crt" # path within Secret
-        fieldParams:
-          label: "Certificate"
-          accept: ".crt,.pem" # Optinal not supported yet
-        validation:
-          required: true
-      tlsKey:
-        uiType: file # Not supported yet
-        path: "data.tls\\.key"
-        fieldParams:
-          label: "Private Key" # path within Secret
-          accept: ".key,.pem" # Optinal not supported yet
-        validation:
-          required: true
+label: "TLS Certificate"
+componentsOrder:
+  - tlsCrt
+  - tlsKey
+components:
+  tlsCrt:
+    uiType: file # Not supported yet
+    path: "data.tls\\.crt" # path within Secret
+    fieldParams:
+      label: "Certificate"
+      accept: ".crt,.pem" # Optional, not supported yet
+    validation:
+      required: true
+  tlsKey:
+    uiType: file # Not supported yet
+    path: "data.tls\\.key"
+    fieldParams:
+      label: "Private Key" # path within Secret
+      accept: ".key,.pem" # Optional, not supported yet
+    validation:
+      required: true
 ```
 
 **types.go:**
@@ -459,6 +466,8 @@ sections:
 // definition/secrets/splithorizon-tls/types.go
 package splithorizontls
 
+// SplitHorizonTLSConfig describes the expected data keys for this secret type.
+// +k8s:openapi-gen=true
 type SplitHorizonTLSConfig struct {
     TLSCrt string `json:"tls.crt"`
     TLSKey string `json:"tls.key"`
