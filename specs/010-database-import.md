@@ -3,7 +3,7 @@
 *   **Status:** Draft
 *   **Authors:** @chilagrow
 *   **Created:** 2026-06-26
-*   **Last Updated:** 2026-07-17
+*   **Last Updated:** 2026-07-27
 *   **Related Issues:** https://github.com/openeverest/openeverest/issues/2471
 
 ---
@@ -72,7 +72,7 @@ When `BackupClass.spec.executionMode=ProviderManaged` and `spec.providerManaged.
 ```mermaid
 graph TD
     User[User] --> Instance[Create Instance CR]
-    Instance --> Check{dataSource.type = External?}
+    Instance --> Check{dataSource.type = Import?}
     Check -->|No| CreateDB[Create DB Resources]
     Check -->|Yes| CreateDBImport[Create DB Resources]
     CreateDB --> EmptyReady[Instance Ready]
@@ -88,12 +88,12 @@ graph TD
 
 #### 4.1.2 Job Import Flow
 
-When `BackupClass.spec.executionMode=Job` and `spec.importJob` is set:
+When `BackupClass.spec.executionMode=Job` and `spec.job.import` is set:
 
 ```mermaid
 graph TD
     User[User] --> Instance[Create Instance CR]
-    Instance --> Check{dataSource.type = External?}
+    Instance --> Check{dataSource.type = Import?}
     Check -->|No| CreateDB[Create DB Resources]
     Check -->|Yes| CreateDBImport[Create DB Resources]
     CreateDB --> EmptyReady[Instance Ready]
@@ -118,14 +118,21 @@ For the instance initialization use case (creating an instance with pre-populate
 
 ```go
 type InstanceSpec struct {
-	// DataSource allows creating a new Instance from an existing
-	// Backup CR of another Instance.
+	// DataSource allows populating a new Instance with data from an existing
+	// Backup CR (type=Backup) or by importing from external storage (type=Import).
 	//
-	// Only ProviderManaged BackupClasses are supported. The referenced Backup
-	// must be in the same namespace, in Succeeded state, and its BackupClass
-	// must list the Instance's provider in SupportedProviders. Instance must
-	// also have backup enabled and include a storage entry that matches the
+	// For type=Backup: The referenced Backup must be in the same namespace, in
+	// Succeeded state, and its BackupClass must list the Instance's provider in
+	// SupportedProviders. Only ProviderManaged BackupClasses are supported.
+	// Instance must have backup enabled and include a storage that matches the
 	// storage used by the source Backup so the provider can access the data.
+	//
+	// For type=Import: The Instance imports data from external storage.
+	// If classRef is not specified, the Instance's ProviderManaged BackupClass
+	// (spec.backup.classRef) is used and backup must be enabled and include
+	// a storage used by spec.dataSource.import.storageRef.
+	// If classRef is specified, that BackupClass is used directly using Job
+	// execution mode.
 	// +optional
     DataSource *backupv1alpha1.DataSource `json:"dataSource,omitempty"`
 
@@ -135,40 +142,53 @@ type InstanceSpec struct {
 
 **File:** `api/backup/v1alpha1/restore_types.go`
 
-The existing `RestoreSpec.DataSource` currently only supports `Backup` type via `DataSourceBackup`. Extend `DataSource` to support `External` type:
+The existing `RestoreSpec.DataSource` currently only supports `Backup` type via `DataSourceBackup`. Extend `DataSource` to support `Import` type:
 
 ```go
-// DataSourceType identifies the kind of data source for restore.
-// +kubebuilder:validation:Enum=Backup;External
+// DataSourceType selects the kind of data source for initial seeding or
+// restore operations.
+// +kubebuilder:validation:Enum=Backup;Import
 type DataSourceType string
 
 const (
-    DataSourceTypeBackup   DataSourceType = "Backup"
-    DataSourceTypeExternal DataSourceType = "External"  // NEW
+    // DataSourceTypeBackup seeds from an existing Backup CR in the same
+    // namespace.
+    DataSourceTypeBackup DataSourceType = "Backup"
+    // DataSourceTypeImport seeds from an external storage location.
+    DataSourceTypeImport DataSourceType = "Import"
 )
 
-// DataSource defines the source for a Restore operation.
+// DataSource defines the source from which data is obtained for a restore
+// or initial Instance seeding operation. The Type field selects which
+// source-specific block is populated.
 type DataSource struct {
-    Type     DataSourceType        `json:"type"`
-    Backup   *DataSourceBackup     `json:"backup,omitempty"`
-    External *DataSourceExternal   `json:"external,omitempty"`  // NEW
+    // Type selects the data source kind.
+    Type DataSourceType `json:"type"`
+    // Backup references an existing Backup CR in the same namespace.
+    // Required when type=Backup.
+    Backup *DataSourceBackup `json:"backup,omitempty"`
+    // Import imports from external storage.
+    // Required when type=Import.
+    Import *DataSourceImport `json:"import,omitempty"`
 }
 
-// DataSourceExternal references an external storage location for import.
-type DataSourceExternal struct {
-    // BackupClassName references the BackupClass that defines the import method
-    BackupClassName string `json:"backupClassName"`
+// DataSourceImport imports data from external storage.
+type DataSourceImport struct {
+    // ClassRef references a BackupClass. Required for Job mode.
+    // ProviderManaged mode uses the Instance's backup class (spec.backup.classRef)
+    // and backup must be enabled.
+    // +optional
+    ClassRef *common.ObjectRef `json:"classRef,omitempty"`
 
-    // StorageName references a BackupStorage CR in the same namespace
-    // that contains S3 credentials and endpoint configuration.
-    StorageName string `json:"storageName"`
-
-    // Config contains all import configuration including:
-    // - path: S3 file/directory path
-    // - credentialsSecretName: Secret with database credentials
-    // Validated against BackupClass.spec.importConfig.openAPIV3Schema
+    // StorageRef references a BackupStorage by name.
     // +kubebuilder:validation:Required
-    Config *runtime.RawExtension `json:"config"`
+    StorageRef common.ObjectRef `json:"storageRef"`
+
+    // Parameters contains all import configuration.
+    // Validated against BackupClass.spec.importParametersSchema.
+    // +kubebuilder:pruning:PreserveUnknownFields
+    // +kubebuilder:validation:Required
+    Parameters *runtime.RawExtension `json:"parameters"`
 }
 ```
 
@@ -180,52 +200,60 @@ BackupClass supports import through both execution modes:
 
 ```go
 type BackupClassSpec struct {
-    DisplayName         string                         `json:"displayName,omitempty"`
-    Description         string                         `json:"description,omitempty"`
-    SupportedProviders  ProviderNameList               `json:"supportedProviders,omitempty"`
-    ExecutionMode       BackupExecutionMode            `json:"executionMode"`
-    ProviderManaged     *ProviderManagedSpec           `json:"providerManaged,omitempty"`
-    Config              BackupClassConfig              `json:"config,omitempty"`
-    RestoreConfig       BackupClassConfig              `json:"restoreConfig,omitempty"`
-    ImportConfig        BackupClassConfig              `json:"importConfig,omitempty"`  // NEW - used by both modes
-    InstanceConstraints BackupClassInstanceConstraints `json:"instanceConstraints,omitempty"`
-    UISchema            *runtime.RawExtension          `json:"uiSchema,omitempty"`
-    Job                 *JobModeSpec                   `json:"job,omitempty"`
-    // ImportJob describes the job spawned to perform an initial data import
-    // when an Instance is created with spec.dataSource.type=External.
-    // Only used when executionMode=Job.
-    ImportJob           *JobExecution                  `json:"importJob,omitempty"`
+    DisplayName              string                         `json:"displayName,omitempty"`
+    Description              string                         `json:"description,omitempty"`
+    SupportedProviders       ProviderNameList               `json:"supportedProviders,omitempty"`
+    ExecutionMode            BackupExecutionMode            `json:"executionMode"`
+    ProviderManaged          *ProviderManagedSpec           `json:"providerManaged,omitempty"`
+    ParametersSchema         common.ParametersSchema        `json:"parametersSchema,omitempty"`
+    RestoreParametersSchema  common.ParametersSchema        `json:"restoreParametersSchema,omitempty"`
+    ImportParametersSchema   common.ParametersSchema        `json:"importParametersSchema,omitempty"`  // NEW
+    InstanceConstraints      BackupClassInstanceConstraints `json:"instanceConstraints,omitempty"`
+    UISchema                 *runtime.RawExtension          `json:"uiSchema,omitempty"`
+    Job                      *JobModeSpec                   `json:"job,omitempty"`
+}
+
+// JobModeSpec bundles everything the in-tree controller needs to run backup,
+// restore, and import operations as Kubernetes Jobs in ExecutionMode="Job".
+//
+// At least one of Backup or Import must be set. A class with only Import is
+// an import-only class (no backup/restore capability).
+type JobModeSpec struct {
+    Backup  *JobExecution `json:"backup,omitempty"`
+    Restore *JobExecution `json:"restore,omitempty"`
+    Import  *JobExecution `json:"import,omitempty"`  // NEW
 }
 
 // ProviderManagedSpec carries configuration for ExecutionMode="ProviderManaged".
 type ProviderManagedSpec struct {
-    SupportsPITR bool `json:"supportsPITR,omitempty"`
-    Limits       *BackupClassLimits `json:"limits,omitempty"`
-    PITRConfigSchema *runtime.RawExtension `json:"pitrConfigSchema,omitempty"`
+    SupportsPITR         bool                     `json:"supportsPITR,omitempty"`
+    Limits               *BackupClassLimits       `json:"limits,omitempty"`
+    PITRParametersSchema *common.ParametersSchema `json:"pitrParametersSchema,omitempty"`
 
     // SupportsImport indicates whether this ProviderManaged class supports
-    // importing from external data sources. When true, the provider handles
-    // Instance.spec.dataSource.type=External by creating operator-native
-    // restore resources (e.g., PerconaServerMongoDBRestore). The import
-    // configuration is validated against ImportConfig.openAPIV3Schema.
+    // importing from external data sources (Instance.spec.dataSource.type=Import).
+    // When true, the provider handles imports by creating operator-native
+    // restore resources (e.g., PerconaServerMongoDBRestore) directly, without
+    // spawning a wrapper Job. The import configuration is validated against
+    // BackupClassSpec.ImportParametersSchema.
     // +optional
-    SupportsImport bool `json:"supportsImport,omitempty"`  // NEW
+    SupportsImport bool `json:"supportsImport,omitempty"`
 }
 ```
 
 **Validation Rules:**
 
 - When `executionMode=ProviderManaged` and `providerManaged.supportsImport=true`:
-  - `importConfig` should be set to define the import configuration schema
+  - `importParametersSchema` should be set to define the import configuration schema
   - Provider handles import by creating operator-native restore CRs
 
-- When `executionMode=Job` and `importJob` is set:
-  - `importConfig` should be set to define the import configuration schema
+- When `executionMode=Job` and `job.import` is set:
+  - `importParametersSchema` should be set to define the import configuration schema
   - Runtime spawns the specified Job to perform the import
 
 - A BackupClass can support backup/restore AND import, or just one of them:
   - ProviderManaged class with `supportsImport=true` can do both backup and import
-  - Job class with only `importJob` (no `job.backup`) is import-only
+  - Job class with only `job.import` (no `job.backup`) is import-only
 
 **How to Define Import UI Schema:**
 
@@ -241,9 +269,9 @@ import:
     source:
       label: "Import Source"
       components:
-        storageName:
+        storageRef:
           uiType: select
-          path: "dataSource.external.storageName"
+          path: "dataSource.import.storageRef.name"
           fieldParams:
             label: "S3 Storage"
             helperText: "S3 storage containing the PBM/mongodump backup"
@@ -253,7 +281,7 @@ import:
             required: true
         path:
           uiType: text
-          path: "dataSource.external.config.path"
+          path: "dataSource.import.parameters.path"
           fieldParams:
             label: "Backup Path"
             placeholder: "backups/2026-07-15/my-cluster"
@@ -266,7 +294,7 @@ import:
       components:
         credentialsSecretName:
           uiType: secret
-          path: "dataSource.external.config.credentialsSecretName"
+          path: "dataSource.import.parameters.credentialsSecretName"
           fieldParams:
             label: "Credentials Secret"
             secretDefinition: psmdb-users
@@ -296,9 +324,9 @@ import:
     source:
       label: "Import Source"
       components:
-        storageName:
+        storageRef:
           uiType: select
-          path: "dataSource.external.storageName"
+          path: "dataSource.import.storageRef.name"
           fieldParams:
             label: "S3 Storage"
             helperText: "S3 storage containing the JSON/CSV file"
@@ -308,7 +336,7 @@ import:
             required: true
         path:
           uiType: text
-          path: "dataSource.external.config.path"
+          path: "dataSource.import.parameters.path"
           fieldParams:
             label: "File Path"
             placeholder: "imports/data.json"
@@ -320,7 +348,7 @@ import:
       components:
         collection:
           uiType: text
-          path: "dataSource.external.config.collection"
+          path: "dataSource.import.parameters.collection"
           fieldParams:
             label: "Collection Name"
             helperText: "Target MongoDB collection"
@@ -328,7 +356,7 @@ import:
             required: true
         database:
           uiType: text
-          path: "dataSource.external.config.database"
+          path: "dataSource.import.parameters.database"
           fieldParams:
             label: "Database Name"
             placeholder: "admin"
@@ -338,7 +366,7 @@ import:
       components:
         credentialsSecretName:
           uiType: secret
-          path: "dataSource.external.config.credentialsSecretName"
+          path: "dataSource.import.parameters.credentialsSecretName"
           fieldParams:
             label: "Credentials Secret"
             secretDefinition: data-import-credentials
@@ -369,7 +397,7 @@ The import UI schema is fetched from the BackupClass:
       "supportsPITR": true,
       "supportsImport": true
     },
-    "importConfig": {
+    "importParametersSchema": {
       "openAPIV3Schema": {
         "type": "object",
         "required": ["path"],
@@ -384,7 +412,7 @@ The import UI schema is fetched from the BackupClass:
           "source": {
             "label": "Import Source",
             "components": {
-              "storageName": { ... },
+              "storageRef": { ... },
               "path": { ... }
             }
           }
@@ -570,31 +598,31 @@ providerManaged:
   limits:
     maxPITREnabledStorages: 1
     maxStorages: 1
-  pitrConfigSchema: PerconaPITRConfig
+  pitrParametersSchema: PerconaPITRParameters
 
-config:
-  openAPIV3Schema: PerconaBackupConfig
+parametersSchema:
+  openAPIV3Schema: PerconaBackupParameters
 
-restoreConfig:
-  openAPIV3Schema: PerconaRestoreConfig
+restoreParametersSchema:
+  openAPIV3Schema: PerconaRestoreParameters
 
-# Import config - requires credentials because PBM backups embed password hashes
-importConfig:
-  openAPIV3Schema: PerconaImportConfig
+# Import parameters - requires credentials because PBM backups embed password hashes
+importParametersSchema:
+  openAPIV3Schema: PerconaImportParameters
 ```
 
-**Import Config Type (definition/backupclasses/percona-backup-mongodb/types.go):**
+**Import Parameters Type (definition/backupclasses/percona-backup-mongodb/types.go):**
 
 ```go
-// PerconaImportConfig describes the configuration accepted when an Instance
-// is created with spec.dataSource.type=External referencing this BackupClass.
+// PerconaImportParameters describes the parameters accepted when an Instance
+// is created with spec.dataSource.type=Import referencing this BackupClass.
 //
 // IMPORTANT: PBM/mongodump backups embed credential hashes. When restoring,
 // the target cluster's users secret MUST contain the same credentials as the
 // source cluster that created the backup. Mismatched credentials render the
 // restored data inaccessible because MongoDB will reject authentication
 // attempts with the wrong password hashes.
-type PerconaImportConfig struct {
+type PerconaImportParameters struct {
     // Path is the S3 path (prefix) where the PBM/mongodump backup data resides.
     // +kubebuilder:validation:Required
     Path string `json:"path"`
@@ -630,26 +658,26 @@ The provider handles this by:
 - PBM handles backup, restore, AND import from PBM-compatible sources
 - Simpler mental model: one class for all PBM operations
 - No config duplication (S3 storage config, supported providers, constraints)
-- Natural extension: BackupClass already has Config, RestoreConfig → adding ImportConfig fits
+- Natural extension: BackupClass already has ParametersSchema, RestoreParametersSchema → adding ImportParametersSchema fits
 
 **How the provider handles this:**
 
-The provider's `SyncPSMDB` function detects `Instance.spec.dataSource.type=External`, checks that
+The provider's `SyncPSMDB` function detects `Instance.spec.dataSource.type=Import`, checks that
 the BackupClass has `providerManaged.supportsImport=true`, copies credentials, and creates a
 `PerconaServerMongoDBRestore` CR:
 
 ```go
 // In provider/import.go - reconcileProviderManagedImport
-func reconcileProviderManagedImport(c *controller.Context, ext *DataSourceExternal, importCfg ImportConfig) error {
+func reconcileProviderManagedImport(c *controller.Context, imp *DataSourceImport, importParams ImportParameters) error {
     // CRITICAL: Copy source database credentials to the target Instance's users
     // secret BEFORE creating the PSMDB CR. PBM backups embed credential hashes;
     // mismatched secrets render the restored data inaccessible.
     usersSecretName := c.Name() + "-users"
-    if err := ensureImportCredentials(c, usersSecretName, importCfg.CredentialsSecretName); err != nil {
+    if err := ensureImportCredentials(c, usersSecretName, importParams.CredentialsSecretName); err != nil {
         return err
     }
 
-    storage, _ := c.BackupStorage(ext.StorageName)
+    storage, _ := c.BackupStorage(imp.StorageRef.Name)
 
     // Create PerconaServerMongoDBRestore CR directly (no Job wrapper)
     psmdbRestore := &psmdbv1.PerconaServerMongoDBRestore{
@@ -661,7 +689,7 @@ func reconcileProviderManagedImport(c *controller.Context, ext *DataSourceExtern
             ClusterName: c.Name(),
             BackupSource: &psmdbv1.PerconaServerMongoDBBackupStatus{
                 Type:        pbmdefs.LogicalBackup,
-                Destination: fmt.Sprintf("s3://%s/%s", storage.Spec.S3.Bucket, importCfg.Path),
+                Destination: fmt.Sprintf("s3://%s/%s", storage.Spec.S3.Bucket, importParams.Path),
                 S3: &psmdbv1.BackupStorageS3Spec{...},
             },
         },
@@ -694,21 +722,22 @@ supportedProviders:
   - percona-server-mongodb
 executionMode: Job
 
-importConfig:
-  openAPIV3Schema: MongoimportConfig
+importParametersSchema:
+  openAPIV3Schema: MongoimportParameters
 
-# NOTE: importJob implementation is TODO
-# importJob:
-#   jobSpec:
-#     image: "percona/everest-mongoimport:latest"
-#     command: ["/mongoimport-wrapper", "/payload/request.json"]
+# NOTE: job.import implementation is TODO
+# job:
+#   import:
+#     jobSpec:
+#       image: "percona/everest-mongoimport:latest"
+#       command: ["/mongoimport-wrapper", "/payload/request.json"]
 ```
 
-**Import Config Type (definition/backupclasses/data-importer/types.go):**
+**Import Parameters Type (definition/backupclasses/data-importer/types.go):**
 
 ```go
-// MongoimportConfig describes the configuration for mongoimport-based imports.
-type MongoimportConfig struct {
+// MongoimportParameters describes the parameters for mongoimport-based imports.
+type MongoimportParameters struct {
     // Path is the S3 path to the JSON or CSV file to import.
     // +kubebuilder:validation:Required
     Path string `json:"path"`
@@ -788,8 +817,10 @@ metadata:
   name: my-mongo-cluster
   namespace: production
 spec:
-  provider: percona-server-mongodb
-  topology: replica-set
+  providerRef:
+    name: percona-server-mongodb
+  topology:
+    name: replica-set
   components:
     engine:
       replicas: 3
@@ -800,13 +831,23 @@ spec:
     size: 50Gi
     class: standard
 
+  # Backup must be enabled for ProviderManaged import without classRef
+  backup:
+    enabled: true
+    classRef:
+      name: percona-backup-mongodb  # Default BackupClass with supportsImport=true
+    storages:
+      - storageRef:
+          name: s3-external-data
+
   # Use the default PBM BackupClass for ProviderManaged import
   dataSource:
-    type: External
-    external:
-      backupClassName: percona-backup-mongodb  # Default BackupClass with supportsImport=true
-      storageName: s3-external-data
-      config:
+    type: Import
+    import:
+      # When classRef is omitted, uses spec.backup.classRef (ProviderManaged mode)
+      storageRef:
+        name: s3-external-data
+      parameters:
         path: backups/2026-07-15/source-cluster   # Path to PBM/mongodump backup in S3
         credentialsSecretName: source-db-credentials  # REQUIRED: source database credentials
 ```
@@ -817,14 +858,14 @@ The Instance controller (ProviderManaged flow):
 
 1. Creates the database instance as normal (StatefulSet, Services, etc.)
 2. Waits for the instance to become healthy AND BackupVersion to be published
-3. Once ready, resolves the `percona-backup-mongodb` BackupClass from `dataSource.external.backupClassName`
+3. Once ready, resolves the BackupClass from `spec.backup.classRef` (since `dataSource.import.classRef` is not set)
 4. Validates the BackupClass has `providerManaged.supportsImport=true`
-5. Validates `dataSource.external.config` against `BackupClass.spec.importConfig.openAPIV3Schema`
+5. Validates `dataSource.import.parameters` against `BackupClass.spec.importParametersSchema.openAPIV3Schema`
 6. **Copies credentials from the user-provided secret to the Instance's users secret**:
-   - The provider reads the secret named by `config.credentialsSecretName`
+   - The provider reads the secret named by `parameters.credentialsSecretName`
    - Copies credential keys to the Instance's internal users secret (e.g., `my-mongo-cluster-mongodb-users`)
    - This ensures the PSMDB CR uses the source database credentials
-7. Fetches S3 credentials from the BackupStorage named by `dataSource.external.storageName`
+7. Fetches S3 credentials from the BackupStorage named by `dataSource.import.storageRef.name`
 8. Creates a `PerconaServerMongoDBRestore` CR directly (no Job wrapper):
 
 ```yaml
@@ -870,7 +911,7 @@ A new collapsible optional "Data Import" section is added as a step of the creat
    GET /clusters/{cluster}/backup-classes
    ```
    Filtered client-side to only show BackupClasses where:
-   - `spec.importJob` is set
+   - `spec.providerManaged.supportsImport=true` OR `spec.job.import` is set
    - `spec.supportedProviders` includes the selected instance provider
 
 2. **Import Form Fields** — rendered from `BackupClass.spec.uiSchema.import`:
@@ -925,15 +966,28 @@ A new collapsible optional "Data Import" section is added as a step of the creat
    {
      "spec": {
        ...
+       "backup": {
+         "enabled": true,
+         "classRef": {
+           "name": "percona-backup-mongodb"
+         },
+         "storages": [
+           {
+             "storageRef": {
+               "name": "s3-external-data"
+             }
+           }
+         ]
+       },
        "dataSource": {
-         "type": "External",
-         "external": {
-           "backupClassName": "psmdb-mongorestore-import",
-           "storageName": "s3-external-data",
-           "config": {
+         "type": "Import",
+         "import": {
+           "storageRef": {
+             "name": "s3-external-data"
+           },
+           "parameters": {
              "path": "/imports/dump",
-             "credentialsSecretName": "{instance-name}-import-creds",
-             ...
+             "credentialsSecretName": "{instance-name}-import-creds"
            }
          }
        }
@@ -961,9 +1015,9 @@ Once the import completes, the condition flips to `status=True` and the banner i
 
 **Decision:** Rejected. The duplication cost outweighs the semantic clarity benefit.
 
-### Alternative 2: Extend Restore CR's DataSource with External Type
+### Alternative 2: Self-contained types in instance_types.go only
 
-**Decision:** Rejected. Restore CR semantically implies restoring to an **existing** instance, but database import creates a **new** instance. Modifying `restore_types.go` to add `External` would couple the restore and import concerns. Instead, all new types are self-contained in `instance_types.go`.
+**Decision:** Rejected. While initially considered to avoid coupling restore and import concerns, the actual implementation shares the `DataSource` type between `restore_types.go` and `instance_types.go`. This provides consistency: both Restore CRs and Instance CRs use the same `DataSource` structure with `type=Import`. The Import variant is semantically valid for both use cases (restoring to an existing instance OR populating a new instance).
 
 ### Alternative 3: Instance Controller Creates a Restore CR Internally
 
