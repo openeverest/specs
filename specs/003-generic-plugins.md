@@ -105,13 +105,13 @@ Any HTTP service. The host never calls it directly from the browser — all traf
 - **In-cluster**: a `Service` name + port in a declared namespace.
 - **External**: an HTTPS URL with credentials stored in a `Secret` referenced by the plugin's installation (chart values / install-time arguments).
 
-A backend can operate in one or more **operation modes** (see §10 for the full model):
+A backend can behave in one or more **behavioral patterns**, depending on what the plugin's code does:
 
-- **Request handler** — responds to HTTP traffic proxied from the UI / `everestctl`. This is the default mode used by interactive plugins (SQL browser, AI copilot).
-- **Daemon** — runs continuously in the background with no inbound user traffic. Used for metering, periodic syncs, scheduled reports, AWS RDS discovery pollers.
+- **Request handler** — responds to HTTP traffic proxied from the UI / `everestctl`. This is the default pattern for interactive plugins (SQL browser, AI copilot). Any plugin that declares `serviceRef` or `externalUrl` is implicitly a request handler.
+- **Daemon** — runs continuously in the background with no inbound user traffic. Used for metering, periodic syncs, scheduled reports, AWS RDS discovery pollers. The plugin's container code decides whether to run as a daemon; the host does not manage this.
 - **Event consumer** — holds an open subscription to the host's lifecycle event stream and reacts to resource changes (cluster created, deleted, backup completed, etc.). Used for audit, billing, external-system synchronisation. This is *pull-based*: the plugin opens the stream; the host does not push outbound HTTP to the plugin.
 
-The modes are not mutually exclusive: a billing plugin typically combines all three — a daemon to roll up usage, a held-open event subscription to capture lifecycle, and a request-handler endpoint to serve the in-UI invoice page.
+These patterns are not mutually exclusive: a billing plugin typically combines all three — a daemon to roll up usage, a held-open event subscription to capture lifecycle, and a request-handler endpoint to serve the in-UI invoice page.
 
 ### 6.3 Frontend bundle (optional)
 
@@ -173,41 +173,7 @@ spec:
     # externalUrl: "https://sql-explorer.saas.example.com"
     # credentialsSecretRef: "sql-explorer-creds"
 
-    # Operation modes. Omit any block the plugin doesn't need.
-    # 'requestHandler' is implicit when 'serviceRef'/'externalUrl' is set
-    # and 'daemon'/'eventSubscriptions' are absent.
-    modes:
-      requestHandler:
-        # The HTTP path prefix on the backend that receives proxied calls
-        # from /v1/plugins/{name}/*. Default "/".
-        basePath: "/api"
-
-      # Daemon mode — the host issues a long-lived, scoped service token to
-      # the backend pod and expects it to run continuously.
-      daemon:
-        # Optional readiness probe path the host uses to consider the daemon
-        # alive. Independent from k8s pod readiness — this is a host-level check.
-        healthPath: "/healthz"
-
-      # Event consumer — declares which event types the plugin intends to
-      # consume from GET /v1/events. Purely informational: used for docs,
-      # RBAC scoping, and as a hint to the host on whether to keep the
-      # plugin's stream slot warm. The plugin is responsible for opening
-      # and holding the SSE connection itself.
-      eventConsumer:
-        types:
-          - database-cluster.created
-          - database-cluster.ready
-          - database-cluster.updated
-          - database-cluster.deleted
-          - backup.completed
-        # Optional namespace filter. Omit to consume from all namespaces the
-        # plugin's permissions allow.
-        namespaces: ["team-alpha", "team-bravo"]
-
   # RBAC: what OpenEverest API resources this plugin needs to call.
-  # Used both for the request-handler JWT (user-bound) and the daemon
-  # service token (autonomous identity).
   permissions:
     - verb: read
       resource: database-clusters
@@ -473,7 +439,7 @@ A daemon backend has no user session driving it. It runs continuously and typica
 - The audit trail is centralised.
 - The hard "no writes to spec-001 resources" guarantee can be enforced uniformly.
 
-**Lifecycle.** When an `InstalledExtension` for a plugin that declares `backend.modes.daemon` reaches `Ready`, the host:
+**Lifecycle.** When an `InstalledExtension` for a plugin that behaves as a daemon reaches `Ready`, the host (in a future Phase 3 implementation):
 
 1. Generates the service token and writes it to the projected `Secret`.
 2. Ensures the backend `Deployment` has at least one replica.
