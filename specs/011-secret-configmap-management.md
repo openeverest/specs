@@ -3,7 +3,7 @@
 *   **Status:** Draft
 *   **Authors:** @chilagrow
 *   **Created:** 2026-06-30
-*   **Last Updated:** 2026-07-13
+*   **Last Updated:** 2026-08-12
 *   **Related Issues:** https://github.com/openeverest/openeverest/issues/1798, https://github.com/openeverest/openeverest/issues/2471
 
 
@@ -53,7 +53,7 @@ metadata:
 **Label meanings:**
 - `openeverest.io/managed: "true"` — Secrets and ConfigMaps created by OpenEverest API
 - `openeverest.io/provider` — Provider that uses Secrets and ConfigMaps type
-- `openeverest.io/definition` — Secrets and ConfigMaps definition for filtering (e.g., `splithorizon-tls`, `data-import-credentials`)
+- `openeverest.io/definition` — Secrets and ConfigMaps definition for filtering (e.g., `splithorizon-tls`, `import-credentials`)
 
 ### 4.2. API Endpoints
 
@@ -250,12 +250,12 @@ If the secret was found, but does not contain the label `"openeverest.io/managed
           "components": { ... }
         }
       },
-      "data-import-credentials": {
+      "import-credentials": {
         "parametersSchema": {
           "openAPIV3Schema": { ... }
         },
         "uiSchema": {
-          // UI schema for data importer credentials
+          // UI schema for import credentials
         }
       }
     },
@@ -275,7 +275,7 @@ If the secret was found, but does not contain the label `"openeverest.io/managed
 
 **Label examples:**
 - Component secret: `"openeverest.io/definition": "splithorizon-tls"`
-- Import credential: `"openeverest.io/definition": "data-import-credentials"`
+- Import credential: `"openeverest.io/definition": "import-credentials"`
 
 #### Query Parameters (List)
 
@@ -355,9 +355,9 @@ data:
   tls.key: "<secure-key>"
 ```
 
-#### Data Importer Example
+#### Import Example
 
-For data importer, instance creation flow (or separate flow as currently done in OpenEverest v1) require additional steps to populate necessary secrets.
+For import, instance creation flow (or separate flow as currently done in OpenEverest v1) require additional steps to populate necessary secrets.
 The example secret `my-mongo-cluster-import-creds` is used only by this instance.
 
 ```
@@ -373,8 +373,8 @@ spec:
     ...
 
   dataSource:
-    type: External # NEW
-    external: # NEW
+    type: Import # NEW
+    import: # NEW
       backupClassName: psmdb-mongoimport-import
       storageName: s3-external-data
       config:
@@ -392,7 +392,7 @@ metadata:
   namespace: production
   labels:
     openeverest.io/provider: percona-server-mongodb
-    openeverest.io/definition: data-import-credentials
+    openeverest.io/definition: import-credentials
 type: Opaque
 data:
   MONGODB_BACKUP_USER: "backup"
@@ -415,7 +415,7 @@ Providers define Secret and ConfigMap types in separate definition files, simila
 ```
 definition/
   secrets/
-    splithorizon-tls/
+    import-credentials/
       definition.yaml  # Schema configuration
       ui.yaml          # UI rendering hints
       types.go         # Go types for schema validation
@@ -430,47 +430,108 @@ definition/
 
 **definition.yaml:**
 ```yaml
-# definition/secrets/splithorizon-tls/definition.yaml
+# definition/secrets/import-credentials/definition.yaml
 parametersSchema:
-  openAPIV3Schema: SplitHorizonTLSConfig
+  openAPIV3Schema: ImportCredentialsConfig
 ```
 
 **ui.yaml:**
 ```yaml
-# definition/secrets/splithorizon-tls/ui.yaml
-label: "TLS Certificate"
+# definition/secrets/import-credentials/ui.yaml
+label: "Import Credentials"
 componentsOrder:
-  - tlsCrt
-  - tlsKey
+  - backupUser
+  - backupPassword
+  - clusterAdminUser
+  - clusterAdminPassword
+  - clusterMonitorUser
+  - clusterMonitorPassword
+  - databaseAdminUser
+  - databaseAdminPassword
+  - userAdminPassword
 components:
-  tlsCrt:
-    uiType: file # Not supported yet
-    path: "data.tls\\.crt" # path within Secret
+  backupUser:
+    uiType: text # TODO: use base64 encoded text
+    path: "data.MONGODB_BACKUP_USER" # use stringData for text, data for base64 encoded text
     fieldParams:
-      label: "Certificate"
-      accept: ".crt,.pem" # Optional, not supported yet
+      label: "Backup User"
     validation:
       required: true
-  tlsKey:
-    uiType: file # Not supported yet
-    path: "data.tls\\.key"
+  backupPassword:
+    uiType: text # TODO: use base64 encoded text
+    path: "data.MONGODB_BACKUP_PASSWORD" # use stringData for text, data for base64 encoded text
     fieldParams:
-      label: "Private Key" # path within Secret
-      accept: ".key,.pem" # Optional, not supported yet
+      label: "Backup Password"
+    validation:
+      required: true
+  clusterAdminUser:
+    uiType: text # TODO: use base64 encoded text
+    path: "data.MONGODB_CLUSTER_ADMIN_USER" # use stringData for text, data for base64 encoded text
+    fieldParams:
+      label: "Cluster Admin User"
+    validation:
+      required: true
+  clusterAdminPassword:
+    uiType: text # TODO: use base64 encoded text
+    path: "data.MONGODB_CLUSTER_ADMIN_PASSWORD" # use stringData for text, data for base64 encoded text
+    fieldParams:
+      label: "Cluster Admin Password"
+    validation:
+      required: true
+  clusterMonitorUser:
+    uiType: text # TODO: use base64 encoded text
+    path: "data.MONGODB_CLUSTER_MONITOR_USER" # use stringData for text, data for base64 encoded text
+    fieldParams:
+      label: "Cluster Monitor User"
+    validation:
+      required: true
+  clusterMonitorPassword:
+    uiType: text # TODO: use base64 encoded text
+    path: "data.MONGODB_CLUSTER_MONITOR_PASSWORD" # use stringData for text, data for base64 encoded text
+    fieldParams:
+      label: "Cluster Monitor Password"
+    validation:
+      required: true
+  databaseAdminUser:
+    uiType: text # TODO: use base64 encoded text
+    path: "data.MONGODB_DATABASE_ADMIN_USER" # use stringData for text, data for base64 encoded text
+    fieldParams:
+      label: "Database Admin User"
+    validation:
+      required: true
+  databaseAdminPassword:
+    uiType: text # TODO: use base64 encoded text
+    path: "data.MONGODB_DATABASE_ADMIN_PASSWORD" # use stringData for text, data for base64 encoded text
+    fieldParams:
+      label: "Database Admin Password"
+    validation:
+      required: true
+  userAdminPassword:
+    uiType: text # TODO: use base64 encoded text
+    path: "data.MONGODB_USER_ADMIN_PASSWORD" # use stringData for text, data for base64 encoded text
+    fieldParams:
+      label: "User Admin Password"
     validation:
       required: true
 ```
 
 **types.go:**
 ```go
-// definition/secrets/splithorizon-tls/types.go
-package splithorizontls
+// definition/secrets/import-credentials/types.go
+package importcredentials
 
-// SplitHorizonTLSConfig describes the expected data keys for this secret type.
+// ImportCredentialsConfig describes the expected data keys for this secret type.
 // +k8s:openapi-gen=true
-type SplitHorizonTLSConfig struct {
-    TLSCrt string `json:"tls.crt"`
-    TLSKey string `json:"tls.key"`
+type ImportCredentialsConfig struct {
+    MongoDBBackupUser           string `json:"MONGODB_BACKUP_USER"`
+    MongoDBBackupPassword       string `json:"MONGODB_BACKUP_PASSWORD"`
+    MongoDBClusterAdminUser     string `json:"MONGODB_CLUSTER_ADMIN_USER"`
+    MongoDBClusterAdminPassword string `json:"MONGODB_CLUSTER_ADMIN_PASSWORD"`
+    MongoDBClusterMonitorUser     string `json:"MONGODB_CLUSTER_MONITOR_USER"`
+    MongoDBClusterMonitorPassword string `json:"MONGODB_CLUSTER_MONITOR_PASSWORD"`
+    MongoDBDatabaseAdminUser     string `json:"MONGODB_DATABASE_ADMIN_USER"`
+    MongoDBDatabaseAdminPassword string `json:"MONGODB_DATABASE_ADMIN_PASSWORD"`
+    MongoDBUserAdminPassword     string `json:"MONGODB_USER_ADMIN_PASSWORD"`
 }
 ```
 
@@ -484,28 +545,26 @@ Below is an example, but final UI schema components will change.
 ui:
   sections:
     configuration:
-      label: "Split Horizon Configuration"
+      label: "Import Configuration"
       components:
-        tlsSecret:
+        importCredentials:
           uiType: secret # New - may change
-          path: spec.components.splithorizon.config.secretRef.name
+          path: spec.dataSource.import.config.credentialsSecretName # New: does not exist yet and may change
+          definition: import-credentials  # New: References definition/secrets/import-credentials
           fieldParams:
-            label: "TLS Certificate"
-            secretDefinition: splithorizon-tls  # New: References definition/secrets/splithorizon-tls
-            createLabel: "+ Add New Certificate" # New - may change
-          dataSource: # Fetch from `GET /secrets?provider=provider-percona-server-mongodb&definition=splithorizon-tls`
-            provider: secret # New - may change
-            definition: splithorizon-tls # New - may change
-            instance-provider: provider-percona-server-mongodb # New - may change
+            label: "Import Credentials"
+            createLabel: "+ Add New Credentials" # New - may change
+          dataSource: # Fetch from `GET /secrets?provider=provider-percona-server-mongodb&definition=import-credentials`
+            # TODO: to match v1 implementation dataSource won't be necessary
           validation:
             required: true
 ```
 
 **How it works:**
-1. Dropdown populated via `GET /secrets?provider=provider-percona-server-mongodb&definition=splithorizon-tls`
+1. Dropdown populated via `GET /secrets?provider=provider-percona-server-mongodb&definition=import-credentials`
 2. Shows existing secrets matching the definition
-3. "Add New" button opens creation modal rendered from `definition/secrets/splithorizon-tls/ui.yaml`
-4. Schema validation uses `definition/secrets/splithorizon-tls/secret.yaml` config
+3. "Add New" button opens creation modal rendered from `definition/secrets/import-credentials/ui.yaml`
+4. Schema validation uses `definition/secrets/import-credentials/secret.yaml` config
 
 ### 4.5. Settings
 
@@ -529,7 +588,7 @@ Under Settings, a dedicated management page allows users to view and manage Secr
 **Layout:**
 - **Tabs**: resources are grouped by:
   1. **Provider** (e.g., "provider-percona-server-mongodb")
-  2. **Definition** within each provider (e.g., "splithorizon-tls", "data-import-credentials")
+  2. **Definition** within each provider (e.g., "splithorizon-tls", "import-credentials")
 
 The list view displays each item and following actions: 
 - **View**: GET (Secret data is not shown for security)
