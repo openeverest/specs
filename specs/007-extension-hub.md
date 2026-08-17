@@ -3,7 +3,7 @@
 *   **Status:** Draft
 *   **Authors:** @recharte
 *   **Created:** 2026-05-18
-*   **Last Updated:** 2026-05-19
+*   **Last Updated:** 2026-07-25
 *   **Related Issues:** openeverest/roadmap#1
 
 ---
@@ -161,6 +161,7 @@ The Phase 1 formula is a **strict subset** of the full schema. Adding `digest`, 
 | **4 — UI** | Extensions browser page, in-product install, maturity badges, capability filter facets | No formula changes |
 | **5 — Trust** | Verified-publisher automation, healthchecks, federation hooks, optional automated `capabilities` verification | `verification` block, `health` field in index |
 | **6 — Generic plugins / frontend** | OCI frontend artifact, bundle serving | `frontend` artifact block |
+| **7 — Gated extensions** | `metadata.access` marker, `spec.gated` block, "Contact vendor" CTA in UI/CLI in lieu of install instructions | `metadata.access` and `spec.gated` introduced as optional fields; no changes to existing entries |
 
 ---
 
@@ -255,6 +256,12 @@ metadata:
   # Author-declared lifecycle stage. Defaults to `alpha` when omitted.
   # Orthogonal to channels (release cadence) and to `health` (operational status).
   maturity: stable  # alpha | beta | stable | deprecated
+  # Distribution mode. Defaults to `public` when omitted.
+  # `gated` extensions are listed in the catalog for discovery but cannot be
+  # installed without contacting the vendor first (license key, private
+  # registry credentials, partner agreement, etc.). Orthogonal to `maturity`,
+  # `verified`, and `health`. See `spec.gated` for the vendor CTA payload.
+  access: public  # public | gated
   maintainers:
     - name: "OpenEverest Team"
       email: "maintainers@openeverest.io"
@@ -342,6 +349,13 @@ spec:
     sbom: "oci://ghcr.io/openeverest/sbom/provider-psmdb@sha256:..."
     slsaProvenance: "oci://ghcr.io/openeverest/provenance/provider-psmdb@sha256:..."
 
+  # --- Gated-access details (required when metadata.access == gated) ---
+  # Example (this extension is public, so the block is commented out):
+  # gated:
+  #   contactUrl: "https://acme.example.com/openeverest/request-access"
+  #   instructions: "Enterprise license required. Contact sales for a trial."
+  #   provider: "Acme Corp"
+
   # --- Install configuration ---
   install:
     helm:
@@ -363,6 +377,7 @@ spec:
 | `metadata.description` | Yes | Max 500 chars |
 | `metadata.license` | Yes | Valid SPDX identifier |
 | `metadata.maturity` | No | One of `alpha`, `beta`, `stable`, `deprecated`. Defaults to `alpha`. Independent of channels (release cadence) and of `health` (operational status). |
+| `metadata.access` | No | One of `public`, `gated`. Defaults to `public`. When `gated`, the catalog surfaces a vendor CTA instead of install instructions (§4.5). |
 | `metadata.maintainers` | Yes | At least one entry with `github` handle |
 | `spec.provider` or `spec.plugin` | Yes | Exactly one, matching `metadata.type` |
 | `spec.compatibility.openeverest` | Yes | Valid semver range |
@@ -371,6 +386,7 @@ spec:
 | `spec.artifacts.frontend` | Conditional | Required when `spec.plugin.contributes.ui == true` |
 | `spec.artifacts.*.channels.*.digest` | Yes | SHA-256 OCI manifest digest |
 | `spec.verification` | No | Optional in v1 |
+| `spec.gated` | Conditional | Required iff `metadata.access == gated`. Must set `contactUrl` (valid URL). Optional `instructions` (≤ 200 chars) and `provider` (display name). |
 | `spec.install.helm.namespace` | Yes | Must be `openeverest-system` for providers |
 
 ### 4.4 Generated Index
@@ -402,6 +418,7 @@ On every merge to `main`, a GitHub Action regenerates `index/index.json`:
       "verified": true,
       "health": "healthy",
       "maturity": "stable",
+      "access": "public",
       "compatibility": {
         "openeverest": ">=2.0.0 <3.0.0",
         "kubernetes": ">=1.27"
@@ -442,6 +459,7 @@ Properties:
 - **`verified`** — computed from the verified-publisher policy (§4.6).
 - **`health`** — one of `healthy`, `degraded`, `broken`, `deprecated`; computed by the healthcheck workflow (§4.7).
 - **`maturity`** — author-declared lifecycle stage from the formula (`alpha`, `beta`, `stable`, `deprecated`). Always emitted; the index applies the `alpha` default when the formula omits the field.
+- **`access`** — distribution mode from the formula (`public`, `gated`). Always emitted; the index applies the `public` default when the formula omits the field. When `gated`, the entry also carries a `gated` object copied verbatim from `spec.gated` (`contactUrl`, optional `instructions`, optional `provider`).
 - **`capabilities`** — verbatim copy of `spec.capabilities` from the formula. Emitted only when non-empty.
 - **Signed** — `index.json.sig` is a cosign keyless signature (Sigstore transparency log) so consumers can verify the index hasn't been tampered with.
 
@@ -494,6 +512,7 @@ sequenceDiagram
 4. **Digest pinning** — the exact OCI manifest digest from the formula is used for the pull. No tag resolution occurs at install time. This guarantees the same bits reviewed in the PR are what gets installed.
 5. **InstalledExtension CR** — records what's installed, from which channel, at which digest. Enables upgrade detection (channel head moved), drift detection, and uninstall.
 6. **Air-gap escape hatch** — the catalog URL is configurable (`everestctl extension catalog add <url>`). OCI refs are mirrorable with standard tools. A future `everestctl extension mirror` command can automate this.
+7. **Gated extensions** — entries with `access: gated` appear in the catalog for discovery but skip the install path entirely. The UI and CLI surface a "Contact vendor" CTA pointing at `spec.gated.contactUrl`; no chart reference, version, or command snippet is rendered. `everestctl extension install <gated-name>` hard-fails with a message pointing at `contactUrl`. A future phase may add license-key / private-registry-auth flows on top of the same `spec.gated` block without a schema break.
 
 ### 4.6 Trust Model
 
@@ -517,7 +536,7 @@ An extension is marked `verified: true` in the index when ALL of the following h
 1. **Identity match** — the `metadata.maintainers[].github` org/user owns the OCI registry namespace in `spec.artifacts.*.channels.*.ref` (e.g., `ghcr.io/openeverest/*` → `openeverest` GitHub org membership).
 2. **Cosign signature present** — at least one channel's artifact has a verifiable cosign signature matching the declared `spec.verification.cosign` identity.
 3. **Active maintenance** — no `health: broken` status in the last 30 days (see §4.7).
-4. **Source repo accessible** — `metadata.sourceRepo` resolves and is not archived.
+4. **Source repo accessible** — `metadata.sourceRepo` resolves and is not archived. **Skipped when `metadata.access == gated`**, since gated extensions may legitimately keep their source repository private.
 
 Verification is **computed**, not manually granted. The healthcheck workflow (§4.7) re-evaluates criteria continuously. The badge is revoked automatically when criteria stop holding.
 
@@ -608,9 +627,9 @@ Maturity gating: when the resolved extension has `maturity: alpha` or `maturity:
 
 #### UI (Extensions page)
 
-- **Browse** — grid/list view of available extensions with category filters, search, type tabs (Providers / Plugins), maturity badge on each card, maturity filter chip (default hides `alpha` and `deprecated`), and capability filter facets auto-populated from observed keys in the index.
+- **Browse** — grid/list view of available extensions with category filters, search, type tabs (Providers / Plugins), maturity badge on each card, maturity filter chip (default hides `alpha` and `deprecated`), a "Gated" badge on cards where `access == gated`, an "Include gated" filter toggle (default on), and capability filter facets auto-populated from observed keys in the index.
 - **Detail** — extension page showing description, README, channels, version history, verification status, compatibility, maturity badge with explanatory tooltip, and a capability matrix table rendered from `capabilities`.
-- **Install** — one-click install with channel selector and optional values override (rendered from `valuesSchema` if available). When the extension's maturity is `alpha`, `beta`, or `deprecated`, the install modal explicitly surfaces this and requires the user to confirm before proceeding.
+- **Install** — one-click install with channel selector and optional values override (rendered from `valuesSchema` if available). When the extension's maturity is `alpha`, `beta`, or `deprecated`, the install modal explicitly surfaces this and requires the user to confirm before proceeding. When `access == gated`, the install section is replaced with a **"Contact vendor"** primary button linking to `gated.contactUrl` plus the optional `instructions` text and "Provided by {provider}" line; no chart reference, version, channel selector, or command snippet is rendered.
 - **Installed** — list of installed extensions with current version, channel, available upgrades, maturity, and health status.
 - **Upgrade** — one-click upgrade to channel head with diff preview.
 
@@ -752,6 +771,8 @@ For high-velocity authors, a **GitHub Action template** is provided that automat
 12. **Capability vocabulary promotion** — when should the recommended vocabulary in `docs/CAPABILITIES.md` get promoted to a validated, category-scoped taxonomy? Phase 5 healthcheck-driven verification is the natural moment (e.g., scrape chart for backup CRDs to corroborate `backups: true`).
 
 13. **Maturity downgrade notification** — should maturity downgrades (e.g., `stable` → `beta`) trigger a consumer-facing notification on already-installed extensions via the `InstalledExtension` reconciler? Or is the next-upgrade-attempt warning sufficient?
+
+14. **Gated-extension automation** — the current design stops at a "Contact vendor" CTA. Follow-up questions: (a) should `spec.gated` grow a `licenseKeyEndpoint` for the vendor to validate a key entered in the UI, (b) should a `pullSecretRef` field be added so a resolved key can inject a Kubernetes `imagePullSecret` for a private OCI chart, (c) should `everestctl` add a `--gated-acknowledged` escape hatch for users who have obtained credentials out-of-band? All three fit on the existing block without a schema break.
 
 ## 8. References
 
