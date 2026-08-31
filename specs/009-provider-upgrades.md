@@ -352,7 +352,7 @@ carrying the `removedInVersion` from the catalog:
 ```yaml
 status:
   conditions:
-    - type: EngineVersionDeprecated
+    - type: ComponentVersionDeprecated
       status: "True"
       reason: ScheduledForRemoval
       message: "mongod 6.0.19 is deprecated and is removed in provider 0.3; upgrade this database to a supported version before that provider upgrade."
@@ -422,9 +422,11 @@ type Release struct {
 }
 ```
 
-All of these originate in the provider's `definition/versions.yaml`, flow through
-`provider-sdk generate` into the chart's generated `provider-spec.yaml`, and onto
-the `Provider` CR — no hand-editing of generated files.
+All of these originate in the provider's `definition/versions.yaml` — except
+`release.version`, which is the chart `appVersion` and is injected by
+`provider-sdk generate` from `Chart.yaml` so the release version is never
+authored twice — and flow into the chart's generated `provider-spec.yaml` and
+onto the `Provider` CR — no hand-editing of generated files.
 
 **The preflight library (`provider-runtime`).** The generic catalog-membership +
 deprecation + upgrade-path check is implemented once:
@@ -695,7 +697,7 @@ type PendingMaintenanceAction struct {
 
 Two new conditions are added alongside the existing `BackupConfigured` /
 `DataSourceReady`: `MaintenancePending` (this part) and the read-only,
-informational `EngineVersionDeprecated` (§6.5).
+informational `ComponentVersionDeprecated` (§6.5).
 
 > **Naming note.** The field is `spec.maintenance`, not `spec.upgradePolicy`,
 > on purpose: it governs disruptive actions *raised against the database*
@@ -819,7 +821,7 @@ Result: BLOCKED (1 error). No changes applied.
 
 The hook exits **non-zero**, so `helm upgrade` (or the GitOps sync) **aborts
 before any resource is applied** — no operator swap, no catalog change. Critically,
-`mongo-legacy`'s owner did not need to wait for this: the `EngineVersionDeprecated`
+`mongo-legacy`'s owner did not need to wait for this: the `ComponentVersionDeprecated`
 condition (§6.5) had already been flagging `6.0.19` on that Instance.
 
 ```mermaid
@@ -938,7 +940,7 @@ until its owner sets `approved: "upgrade-to-0.5"`. `mongo-staging`, still
   the Helm pre-upgrade hook that runs it against live Instances and aborts before
   apply (the sole enforcement surface). Generic membership check plus the
   declarative operator upgrade-path floor (`minUpgradableFrom`, R2), and the
-  read-only `EngineVersionDeprecated` Instance condition (§6.5) — no provider code
+  read-only `ComponentVersionDeprecated` Instance condition (§6.5) — no provider code
   required.
 - **Phase 2 — Disruption control.** `spec.maintenance` + `Context.RequestMaintenance`
   + reconciler flush; PSMDB `crVersion` restart modeled abstractly via
@@ -966,7 +968,7 @@ until its owner sets `approved: "upgrade-to-0.5"`. `mongo-staging`, still
   instead of causing downtime (R4).
 - A **deprecated-but-present** version yields a warning with a runway, not a
   block, and is surfaced on a running Instance via the read-only
-  `EngineVersionDeprecated` condition before any upgrade is attempted.
+  `ComponentVersionDeprecated` condition before any upgrade is attempted.
 - After a successful upgrade, non-disruptive convergence applies automatically;
   disruptive actions stay held (`MaintenancePending=True`, phase `Ready`, no
   downtime) until the owner sets `approved` to the held action's token.
