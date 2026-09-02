@@ -157,10 +157,13 @@ spec:
       - type: clusterDetailTab
         label: "Query"
         component: ClusterQueryTab       # exported name in the bundle
-        # Optional: limit to specific database engine types.
-        # Valid values: "postgresql", "psmdb", "pxc".
-        # Omit to show for all engine types.
-        providers: ["postgresql"]
+        # Optional: limit to specific providers. Values match the instance's
+        # spec.providerRef.name, e.g. "provider-percona-postgresql",
+        # "percona-server-mongodb", "percona-xtradb-cluster".
+        # Set here (in the CR) to scope the plugin without rebuilding the bundle;
+        # this overrides any providers baked into the bundle registration.
+        # Omit to show for all providers.
+        providers: ["provider-percona-postgresql"]
 
   # Backend contribution (optional).
   backend:
@@ -251,14 +254,14 @@ Extension points are **additive** — a plugin can register for multiple points.
 
 #### Provider filtering
 
-Extension points that render in a database context (`clusterDetailTab`, `clusterAction`, `clusterCard`) support an optional `providers` filter. When declared, the host only renders the contribution for clusters whose `spec.engine.type` matches one of the listed values. Valid values are `"postgresql"`, `"psmdb"` (MongoDB), and `"pxc"` (MySQL).
+Extension points that render in a database context (`clusterDetailTab`, `clusterAction`, `clusterCard`, `instanceCreateFormSection`, `instanceEditFormSection`) support an optional `providers` filter. When declared, the host only renders the contribution for instances whose `spec.providerRef.name` matches one of the listed values, e.g. `"provider-percona-postgresql"`, `"percona-server-mongodb"`, `"percona-xtradb-cluster"`. Provider names are not prefix-consistent across providers — check the target provider's own definition rather than assuming a naming scheme.
 
-The filter is expressed in two complementary places:
+The filter can be set in two places:
 
-- **Plugin CR** (`spec.frontend.extensionPoints[].providers`) — documents the intent in the manifest; the value is forwarded by `GET /v1/plugins` to the frontend shell.
-- **Bundle registration** (`registerExtension` call, `providers` field on the extension object) — the runtime gate; the host skips rendering the component if the current cluster's engine type is not in the list.
+- **Plugin CR** (`spec.frontend.extensionPoints[].providers`) — **the source of truth.** The value is forwarded by `GET /v1/plugins` to the frontend shell, which merges it onto the registered extension (matching by extension type plus `path`, falling back to `label`). This lets an operator scope a plugin to specific providers by editing the CR alone, with no bundle rebuild.
+- **Bundle registration** (`registerExtension` call, `providers` field on the extension object) — an optional default the plugin author bakes in. When the CR declares `providers` for the matching extension point, the CR value **overrides** the bundle value; when the CR omits it, the bundle value stands.
 
-Omitting `providers` (or leaving it empty) means "show for all engine types". Existing plugins that do not set the field are unaffected.
+Omitting `providers` in both places means "show for all providers". Existing plugins that set the field only in the bundle are unaffected.
 
 #### Instance creation / edit form sections
 
@@ -361,7 +364,8 @@ New package at `ui/packages/plugin-sdk`. Public surface:
 ```ts
 // Registration — extension object shape determines the contribution type.
 // Database-context extensions (clusterDetailTab, clusterAction, clusterCard)
-// accept an optional 'providers' field to restrict rendering by engine type.
+// accept an optional 'providers' field to restrict rendering by provider
+// (matched against the instance's spec.providerRef.name).
 registerExtension(extension: Extension): void
 
 // Example: PostgreSQL-only detail tab
@@ -370,7 +374,7 @@ api.registerExtension({
   label: 'SQL Query',
   path: 'sql-query',
   component: SqlQueryTab,
-  providers: ['postgresql'],   // omit to show for all engine types
+  providers: ['provider-percona-postgresql'],   // optional default; the CR can override. Omit to show for all providers
 });
 
 // Hooks — bridge to the host's React context
