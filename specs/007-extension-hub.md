@@ -130,6 +130,10 @@ Capabilities:
   pitr                   true
   monitoring.prometheus  true
 
+Prerequisites:
+  cert-manager           Required by this provider to issue webhook TLS certificates.
+                         Docs: https://cert-manager.io/docs/installation/helm/
+
 To install, run:
   helm install provider-percona-server-mongodb \
     oci://ghcr.io/openeverest/charts/provider-percona-server-mongodb \
@@ -358,6 +362,20 @@ spec:
 
   # --- Install configuration ---
   install:
+    # Companion charts or tools that must be installed before this extension's
+    # Helm chart. Surfaced by the hub UI and `everestctl extension info`.
+    prerequisites:
+      - name: cert-manager
+        description: "Required by this provider to issue webhook TLS certificates."
+        installUrl: https://cert-manager.io/docs/installation/helm/
+        # Optional Helm coordinates used to generate a copy-paste install command.
+        helm:
+          oci: oci://quay.io/jetstack/charts/cert-manager
+          version: "v1.16.2"
+          namespace: cert-manager
+          createNamespace: true
+          defaultValues:
+            crds.enabled: "true"
     helm:
       releaseName: provider-percona-server-mongodb
       namespace: openeverest-system
@@ -387,6 +405,7 @@ spec:
 | `spec.artifacts.*.channels.*.digest` | Yes | SHA-256 OCI manifest digest |
 | `spec.verification` | No | Optional in v1 |
 | `spec.gated` | Conditional | Required iff `metadata.access == gated`. Must set `contactUrl` (valid URL). Optional `instructions` (≤ 200 chars) and `provider` (display name). |
+| `spec.install.prerequisites` | No | Optional list of companion charts/tools required before this extension's chart. Each entry needs `name`; optional `description`, `installUrl` (docs link), and a `helm` block (`oci` + `namespace` required; optional `version`, `createNamespace`, `defaultValues`) used to render an install command. Surfaced in the hub UI drawer and `everestctl extension info`. |
 | `spec.install.helm.namespace` | Yes | Must be `openeverest-system` for providers |
 
 ### 4.4 Generated Index
@@ -446,7 +465,14 @@ On every merge to `main`, a GitHub Action regenerates `index/index.json`:
         "helm": {
           "releaseName": "provider-percona-server-mongodb",
           "namespace": "openeverest-system"
-        }
+        },
+        "prerequisites": [
+          {
+            "name": "cert-manager",
+            "description": "Required by this provider to issue webhook TLS certificates.",
+            "installUrl": "https://cert-manager.io/docs/installation/helm/"
+          }
+        ]
       },
       "lastUpdated": "2026-05-10T08:30:00Z"
     }
@@ -461,6 +487,7 @@ Properties:
 - **`maturity`** — author-declared lifecycle stage from the formula (`alpha`, `beta`, `stable`, `deprecated`). Always emitted; the index applies the `alpha` default when the formula omits the field.
 - **`access`** — distribution mode from the formula (`public`, `gated`). Always emitted; the index applies the `public` default when the formula omits the field. When `gated`, the entry also carries a `gated` object copied verbatim from `spec.gated` (`contactUrl`, optional `instructions`, optional `provider`).
 - **`capabilities`** — verbatim copy of `spec.capabilities` from the formula. Emitted only when non-empty.
+- **`install.prerequisites`** — verbatim copy of `spec.install.prerequisites` from the formula. Emitted only when non-empty; consumers (hub UI, `everestctl`) surface these before the install step.
 - **Signed** — `index.json.sig` is a cosign keyless signature (Sigstore transparency log) so consumers can verify the index hasn't been tampered with.
 
 The index is hosted via **GitHub Pages** at `https://hub.openeverest.io/index.json` (or equivalent custom domain).
