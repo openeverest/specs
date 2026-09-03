@@ -307,11 +307,13 @@ Three properties make this robust:
   pre-upgrade hook instead runs *before any resource in the release is applied*;
   a non-zero exit aborts the whole upgrade.
 - **It needs no provider code, no standing component, and no internet.** It runs
-  the new provider image (already pulled for the release; it carries the target
-  catalog, **P**, and `minUpgradableFrom`), reads the installed `Provider` CR for
-  the current **P**, and lists Instances — all in-cluster, with only ephemeral
-  read-only RBAC shipped by the chart. Being a one-shot Job, it can't tear the
-  gate down mid-upgrade.
+  the new provider image in preflight mode against the target catalog — a
+  ConfigMap the chart renders from the same generated `provider-spec.yaml` the
+  release applies (carrying **P** and `minUpgradableFrom`), so the catalog has a
+  single source of truth and the image embeds no definition files — reads the
+  installed `Provider` CR for the current **P**, and lists Instances — all
+  in-cluster, with only ephemeral read-only RBAC shipped by the chart. Being a
+  one-shot Job, it can't tear the gate down mid-upgrade.
 - **The hard-block surface is tiny and a block is clean.** Skew means the hook
   only blocks the rare truly-removed case; the common upgrade passes and produces
   a pending action handled by Part 2 (§7). A block aborts before anything applies,
