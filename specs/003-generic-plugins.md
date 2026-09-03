@@ -3,7 +3,7 @@
 *   **Status:** Draft
 *   **Authors:** @spron-in
 *   **Created:** 2026-04-09
-*   **Last Updated:** 2026-06-23
+*   **Last Updated:** 2026-09-03
 *   **Related Issues:**
 *   **Related specs:** [001 — Modular core / Provider plugins](./001-plugins-architecture.md)
 
@@ -199,7 +199,7 @@ rejected at install time.
 `metadata.name` is the plugin's canonical identity. It is referenced as a
 global key by the proxy path (`/v1/plugins/{name}/...`), Everest RBAC
 (`plugin/<name>`, §11.2), frontend extension-point routes (`/plugins/{name}`),
-`InstalledExtension.spec.pluginName`, the CLI subcommand, and the API group
+`InstalledExtension.spec.plugin.pluginCRName`, the CLI subcommand, and the API group
 of any `customResources` (`<name>.plugins.openeverest.io`, §10.8). It must
 equal the chart's identity — see §10.7 for the chart-side rule. The host
 rejects `Plugin` CRs whose name does not match `^[a-z][a-z0-9-]{0,62}$` or
@@ -222,12 +222,33 @@ metadata:
   name: sql-explorer
 spec:
   type: plugin                       # provider | plugin
-  pluginName: sql-explorer           # references Plugin CR (for type=plugin)
+  catalogId: openeverest-official    # optional; empty for manual installs
+  channel: stable                    # optional
   version: "1.2.0"
+  chartDigest: "sha256:..."          # optional in early phases
+
+  plugin:                            # required when type=plugin
+    pluginCRName: sql-explorer       # references the Plugin CR
+    frontendDigest: "sha256:..."     # optional
+    backendImageDigest: "sha256:..." # optional
+
+  # Mutually exclusive with spec.plugin.
+  provider:                          # required when type=provider
+    providerName: percona-server-mongodb
 
 status:
   phase: Installed                   # Installed | Upgrading | Failed | Uninstalling
-  conditions: []
+  conditions:
+    - type: Ready
+    - type: BundleServed             # plugin-only
+    - type: BackendReachable         # plugin-only
+    - type: TokenIssued              # plugin-only, daemon mode
+    - type: CRDsInstalled            # plugin-only, stateful plugins
+    - type: ProviderRegistered       # provider-only
+  installedAt: "2026-05-08T12:00:00Z"
+  availableUpgrade:
+    version: "1.3.0"
+    chartDigest: "sha256:..."
 ```
 
 ## 8. UI Extension Points
@@ -353,6 +374,21 @@ At shell startup:
 3. Plugin calls api.registerExtension("clusterDetailTab", MyComponent)
 4. Shell renders registered components at the declared extension points.
 ```
+
+#### Host-component rendering & isolation
+
+The shell never mounts a plugin component directly into a core page. Every
+registered contribution is rendered through a dedicated **host component** that
+owns the mount point, injects the extension-point props, and provides the shared
+React context (theme, router, auth). Each extension-point type has its own host
+wrapper — e.g., a route host for `route`, a tab host for `clusterDetailTab`, a
+settings host for `settingsPanel`.
+
+Each host wrapper is required to isolate plugin failures behind a **plugin error
+boundary**: a plugin component that throws must render a contained fallback in
+its own slot and must never crash the host shell or sibling plugins. The host
+also filters registrations against the extension points declared in the plugin's
+manifest — a bundle that registers for a point it did not declare is ignored.
 
 ### 9.2 `@everest/plugin-sdk`
 
