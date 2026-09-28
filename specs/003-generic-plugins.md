@@ -117,7 +117,7 @@ These patterns are not mutually exclusive: a billing plugin typically combines a
 
 A single ESM JavaScript file. It exports a `register(api)` function that calls `api.registerExtension(point, component)` to fill extension points. The React shell dynamically imports it at startup after fetching the enabled-plugins list from `GET /v1/clusters/{cluster}/plugins`.
 
-The bundle shares only React with the host (through a browser import map) and bundles its own MUI; it looks native by theming that MUI from the host's `--everest-*` design tokens via `@openeverest/plugin-theme`. See §8.1 and §9.3–§9.5.
+The bundle shares only React with the host (through a browser import map) and bundles its own UI library. A plugin that uses MUI can look native with no extra work by theming it from the host's `--everest-*` design tokens via `@openeverest/plugin-theme`. See §8.1 and §9.3–§9.5.
 
 ### 6.4 CLI contribution (optional)
 
@@ -304,14 +304,19 @@ The `instanceCreateFormSection` and `instanceEditFormSection` extension points l
 | `namespace` | `string` | Target namespace for the instance. |
 | `instance` | `Instance \| undefined` | The existing instance (edit mode only; `undefined` during create). |
 
-### 8.1 UI/UX consistency requirements
+### 8.1 UI/UX consistency
 
-Plugins **must** look and feel like the core: a user should not be able to tell
-plugin-contributed UI from core UI. Plugins must also **keep working when the
-host upgrades its UI stack** (MUI, theme internals) without being rebuilt. The
-two goals pull against each other; the model below
+Plugins **should** look and feel like the core, so plugin-contributed UI sits
+naturally next to core UI. This is a recommendation, not a gate: a plugin that
+looks different is still a valid plugin. The value is on the author's side —
+with the host's theming bridge, a plugin gets the core palette, typography and
+live light/dark switching without building any of that itself.
+
+Plugins **must**, however, keep working when the host upgrades its UI stack
+(MUI, theme internals) without being rebuilt, and must never break the host or
+other plugins. The model below
 ([openeverest#2661](https://github.com/openeverest/openeverest/issues/2661))
-resolves them by sharing only React and design tokens.
+serves both by sharing only React and design tokens.
 
 **Delivery model:**
 
@@ -331,55 +336,58 @@ Consequences:
 - Each plugin downloads its own MUI and Emotion (roughly 75–110 kB gzip per
   bundle). This is the price of upgrade independence (see §19, bundle size).
 
-**Required:**
+**Rules every plugin must follow** — they protect the host and other plugins,
+whatever UI library the plugin uses:
 
-- **MUI for UI.** Use `@mui/material` for all UI elements — buttons, tables,
-  dialogs, forms, typography. The plugin installs and bundles it itself (§9.3).
-  Do not use alternative component libraries (Ant Design, Chakra, etc.).
-- **Wrap every root in `PluginThemeProvider`.** Every component the plugin
-  registers renders its tree inside `PluginThemeProvider` from
-  `@openeverest/plugin-theme`, with the plugin's `cacheKey` and
-  `nonce={api.cssNonce}` (§9.4). Do not wrap plugin UI in your own
-  `ThemeProvider` / `createTheme()`: the palette would stop following the host.
-  Read theme values with `useTheme()` or the `sx` prop.
-- **`sx` prop and `styled()` for styling.** Use MUI's `sx` prop or `styled`
-  for custom styles; they go through the plugin's own Emotion cache, which
-  `PluginThemeProvider` namespaces with `cacheKey`. Do not introduce separate
-  CSS-in-JS runtimes (styled-components, Tailwind runtime, Stitches, etc.) —
-  multiple runtimes cause specificity conflicts and increase bundle size.
 - **No global CSS.** Do not import `.css` files that produce global selectors,
-  add `CssBaseline` or `GlobalStyles`, write custom properties to `:root`, or
-  manipulate `document.styleSheets`. The host owns document-level styles.
-  Exception: a third-party library's own stylesheet whose selectors are all
-  scoped under that library's classes (e.g. `.react-flow`) may be inlined as a
-  `<style nonce={api.cssNonce}>` inside the plugin tree, because library-mode
-  builds emit no CSS file the host would load.
-- **Design tokens over magic values.** Reference `theme.palette`, `theme.spacing`,
-  `theme.typography`, and `theme.shape` rather than hard-coding pixel values,
-  hex colours, or font families. Outside MUI (charts, diagrams, plain CSS), use
-  the `--everest-*` variables directly (§9.4). This ensures plugins respect
-  light/dark mode and future theme changes.
+  add `CssBaseline` or `GlobalStyles`, inject a CSS reset or normalise
+  stylesheet, write custom properties to `:root`, or manipulate
+  `document.styleSheets`. The host owns document-level styles. A third-party
+  library's own stylesheet whose selectors are all scoped under that library's
+  classes (e.g. `.react-flow`) may be inlined as a `<style nonce={api.cssNonce}>`
+  inside the plugin tree, because library-mode builds emit no CSS file the host
+  would load.
+- **No overrides of host elements**, including `!important` rules targeting
+  host markup.
+- **Stay inside the mount point.** Do not append to `document.body` or other
+  host DOM directly; overlays go through a portal (MUI `Portal`, or MUI
+  components that portal such as `Dialog`, `Menu`, `Tooltip`).
+- **Isolated, CSP-compliant styles.** Styles are injected under a plugin-unique
+  Emotion cache key and carry `api.cssNonce` (`PluginThemeProvider` does both,
+  §9.4).
+- **Depend only on the public contract.** Do not read the host's `--mui-*`
+  variables or rely on the host's React theme context; they are MUI internals
+  of the host and change on a host MUI upgrade. `--everest-*` is the stable
+  contract.
+- **Do not enable MUI `cssVariables`** in a plugin theme. It writes `--mui-*`
+  variables to `:root`, where they collide with the host's.
+- **Bundle rules** in §9.3 (React external, one copy of each UI library).
+
+**Recommended for a native look** — each of these saves the author work:
+
+- **MUI with `@openeverest/plugin-theme`.** Build UI with `@mui/material` and
+  wrap every registered component in `PluginThemeProvider` (§9.4). The plugin
+  then follows the host palette, typography, radius and light/dark mode with no
+  code of its own. Avoid wrapping plugin UI in your own `ThemeProvider` /
+  `createTheme()`: the palette would stop following the host.
+- **`sx` prop and `styled()` for styling.** They go through the plugin's own
+  Emotion cache. A second CSS-in-JS runtime (styled-components, Stitches, a
+  Tailwind runtime) adds bundle size and specificity conflicts.
+- **Design tokens over magic values.** Reference `theme.palette`,
+  `theme.spacing`, `theme.typography`, and `theme.shape` rather than
+  hard-coding pixel values, hex colours, or font families, so the plugin
+  respects light/dark mode and future theme changes.
+- **Using a different UI library?** The `--everest-*` variables and
+  `data-everest-color-scheme` are plain CSS, so any library, chart or canvas can
+  follow the host colours and mode (§9.4).
 - **Layout patterns.** Use MUI layout primitives (`Box`, `Stack`, `Grid`,
-  `Container`) for page structure. Follow the host's existing spacing rhythm
-  (typically `theme.spacing(2)` / `theme.spacing(3)` between sections).
-- **Icons.** Use `@mui/icons-material`, installed by the plugin at the same
-  major as its `@mui/material`. For custom icons not in the MUI set, use inline
-  SVG wrapped in `SvgIcon`.
-
-**Prohibited:**
-
-- Importing Tailwind CSS, Bootstrap, or any global utility-class framework.
-- Injecting a separate CSS reset or normalise stylesheet.
-- Using `!important` overrides on host elements.
-- Rendering outside the plugin's mounted container (e.g., appending to
-  `document.body` directly). Use MUI `Portal` (or MUI components that portal,
-  such as `Dialog`, `Menu`, `Tooltip`) if an overlay is needed.
-- Bundling custom fonts. Plugins inherit the host's font stack via the tokens.
-- Reading the host's `--mui-*` variables or relying on the host's React theme
-  context. They are MUI internals of the host and can change on a host MUI
-  upgrade; `--everest-*` is the stable contract.
-- Enabling MUI `cssVariables` in a plugin theme. It writes `--mui-*` variables
-  to `:root`, where they collide with the host's.
+  `Container`) for page structure and the host's spacing rhythm (typically
+  `theme.spacing(2)` / `theme.spacing(3)` between sections).
+- **Icons.** Use `@mui/icons-material`, installed at the same major as the
+  plugin's `@mui/material`. For custom icons, use inline SVG wrapped in
+  `SvgIcon`.
+- **Host fonts.** Rely on the host font stack (delivered through the tokens)
+  rather than bundling custom fonts.
 
 **What the plugin inherits from the host today:**
 
@@ -394,18 +402,17 @@ Consequences:
 Tokens are additive: new groups can be published without breaking existing
 plugins (§19).
 
-**Enforcement:**
+**Tooling:**
 
-- The `everestctl extension lint` command (P1 DX tooling) will statically analyse
-  the bundle for prohibited imports and global CSS injection patterns, and for
-  the bundle rules in §9.3 (only host-provided bare imports, no CommonJS
-  `require("react")`, a single copy of MUI and Emotion).
+- The `everestctl extension lint` command (P1 DX tooling) will statically check
+  the bundle against the rules above and in §9.3 (global CSS injection, only
+  host-provided bare imports, no CommonJS `require("react")`, a single copy of
+  MUI and Emotion). The look-and-feel recommendations are not linted.
 - The `@openeverest/plugin-sdk/testing` mock host publishes the `--everest-*`
-  tokens, so plugin unit tests render with the host look and catch visual
-  regressions.
-- The Plugin SDK's TypeScript types guide authors toward the correct patterns
-  at compile time (e.g., extension-point components receive `sx`-compatible
-  props rather than `className`).
+  tokens, so plugin unit tests render with the host look.
+- The Plugin SDK's TypeScript types guide authors toward the recommended
+  patterns at compile time (e.g., extension-point components receive
+  `sx`-compatible props rather than `className`).
 - A reference compatibility suite (`ui/plugin-compat` in the core repo, branch
   `poc/plugin-mui-isolation`) loads prebuilt plugin bundles under hosts built
   with different MUI majors and checks theming, dark mode, portals, style
@@ -643,7 +650,7 @@ theme from them with the plugin's MUI, gives the plugin its own namespaced
 Emotion cache, and rebuilds the theme whenever the host switches between light
 and dark. It renders no `CssBaseline`: document-level styles belong to the host.
 
-Wrap every registered component once, typically with a small root component:
+When using the package, wrap every registered component once, typically with a small root component:
 
 ```tsx
 import type { ReactNode } from 'react';
