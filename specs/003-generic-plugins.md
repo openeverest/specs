@@ -389,18 +389,13 @@ whatever UI library the plugin uses:
 - **Host fonts.** Rely on the host font stack (delivered through the tokens)
   rather than bundling custom fonts.
 
-**What the plugin inherits from the host today:**
-
-| Inherited (via `--everest-*`) | Not inherited yet |
-|---|---|
-| Palette `primary`, `secondary`, `error`, `warning`, `info`, `success` (main/dark/light) | Component style overrides of the core theme (e.g. the core's pill-shaped `Button`, `Chip`, `Card`, `Dialog`, input and table styling) |
-| Text (primary/secondary/disabled), background (default/paper), divider | Custom typography variants (e.g. `helperText`) |
-| Typography per variant: family, size, weight, line height, letter spacing, text transform | Shadows/elevation, grey scale, action states (hover/selected/disabled) |
-| Corner radius (`theme.shape.borderRadius`) | Breakpoints, z-index, transitions (plugins get MUI defaults, which currently match the host) |
-| Light/dark mode, switching live without a reload | |
-
-Tokens are additive: new groups can be published without breaking existing
-plugins (§19).
+**What the plugin inherits from the host today:** palette, text and background
+colours, typography (including text transform and letter spacing), corner
+radius, and light/dark mode, switching live. **Not shared yet:** the core
+theme's component style overrides (e.g. the pill-shaped `Button`), custom
+typography variants, shadows, the grey scale and action states; breakpoints,
+z-index and transitions are MUI defaults, which currently match the host. The
+exact token list is in §9.4; sharing more is §19 Q13.
 
 **Tooling:**
 
@@ -698,19 +693,26 @@ export default register;
 re-renders on change. Use it for code that doesn't go through the MUI theme
 (chart libraries, canvas drawing).
 
-**Token contract.** The host publishes these variables on `:root` and keeps them
-in sync with its theme, including on light/dark switches:
+**Token contract.** The host publishes its design tokens as CSS custom
+properties on `:root` and keeps them in sync with its theme, including on
+light/dark switches. Names follow three patterns:
 
-| Variable | Value |
-|---|---|
-| `--everest-color-{primary,secondary,error,warning,info,success}-{main,dark,light}` | Palette colours |
-| `--everest-color-text-{primary,secondary,disabled}` | Text colours |
-| `--everest-color-background-{default,paper}` | Background colours |
-| `--everest-color-divider` | Divider colour |
-| `--everest-radius` | Corner radius, unitless pixels (e.g. `4`) |
-| `--everest-font-{variant}-{family,size,weight,line-height,letter-spacing,transform}` | Typography per variant, for `h1`–`h6`, `subtitle1`, `subtitle2`, `body1`, `body2`, `button`, `caption`, `overline` |
+- `--everest-color-<name>` / `--everest-color-<name>-<shade>` — palette, text,
+  background and divider colours (e.g. `--everest-color-primary-main`,
+  `--everest-color-text-secondary`);
+- `--everest-font-<variant>-<property>` — typography per MUI variant (e.g.
+  `--everest-font-body1-family`, `--everest-font-button-transform`);
+- `--everest-radius` — corner radius, unitless pixels.
 
-and the active mode as `data-everest-color-scheme="light" | "dark"` on `<html>`.
+The active mode is published as `data-everest-color-scheme="light" | "dark"`
+on `<html>`.
+
+The exact list is defined in one place, `writeEverestTokens` in
+`ui/packages/design/src/theme-context-provider/everest-tokens.ts` (core repo);
+how each token maps onto the plugin's MUI theme is in
+`ui/packages/plugin-theme/src/plugin-theme-provider.tsx`. The package README of
+`@openeverest/plugin-theme` is the place for the author-facing reference once
+the package is published.
 
 Outside MUI (plain CSS, third-party components) plugins may use the variables
 directly, e.g. `color: var(--everest-color-text-secondary)`. Inside MUI code,
@@ -718,8 +720,8 @@ prefer `theme.palette.*`: MUI's colour helpers (`alpha`, `darken`, `lighten`)
 cannot parse `var(...)` values.
 
 The variable names are a **public contract**. New variables can be added at any
-time without breaking plugins; renaming or removing one is a breaking host
-change.
+time without breaking plugins (additive, independent of MUI version); renaming
+or removing one is a breaking host change.
 
 ### 9.5 Compatibility & versioning
 
