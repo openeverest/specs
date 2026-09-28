@@ -3,8 +3,8 @@
 *   **Status:** Draft
 *   **Authors:** @spron-in
 *   **Created:** 2026-04-09
-*   **Last Updated:** 2026-09-17
-*   **Related Issues:**
+*   **Last Updated:** 2026-09-28
+*   **Related Issues:** [openeverest#2661](https://github.com/openeverest/openeverest/issues/2661) (plugin UI design), [openeverest#3076](https://github.com/openeverest/openeverest/pull/3076) (implementation)
 *   **Related specs:** [001 — Modular core / Provider plugins](./001-plugins-architecture.md)
 
 ---
@@ -117,6 +117,8 @@ These patterns are not mutually exclusive: a billing plugin typically combines a
 
 A single ESM JavaScript file. It exports a `register(api)` function that calls `api.registerExtension(point, component)` to fill extension points. The React shell dynamically imports it at startup after fetching the enabled-plugins list from `GET /v1/clusters/{cluster}/plugins`.
 
+The bundle shares only React with the host (through a browser import map) and bundles its own MUI; it looks native by theming that MUI from the host's `--everest-*` design tokens via `@openeverest/plugin-theme`. See §8.1 and §9.3–§9.5.
+
 ### 6.4 CLI contribution (optional)
 
 A container image (can be the same image as the backend) that the plugin exposes as a CLI subcommand through `everestctl`.
@@ -134,7 +136,8 @@ spec:
   displayName: "SQL Explorer"
   description: "Query and browse your databases directly from the OpenEverest UI."
   version: "1.2.0"
-  compatibleHostVersions: ">=2.0.0 <3.0.0"
+  compatibleHostVersions: ">=2.0.0 <3.0.0"        # host application version (API gate)
+  compatibleUiContractVersions: ">=18.0.0 <19.0.0" # shared React major (UI gate, §9.5)
   vendor: "Acme Corp"
   icon: "https://example.com/icon.png"   # or omit for default
 
@@ -303,36 +306,65 @@ The `instanceCreateFormSection` and `instanceEditFormSection` extension points l
 
 ### 8.1 UI/UX consistency requirements
 
-Plugins **must** use the host's existing design system and styling infrastructure.
-The goal is that a user cannot visually distinguish plugin-contributed UI from
-core UI — plugins feel native, not bolted on.
+Plugins **must** look and feel like the core: a user should not be able to tell
+plugin-contributed UI from core UI. Plugins must also **keep working when the
+host upgrades its UI stack** (MUI, theme internals) without being rebuilt. The
+two goals pull against each other; the model below
+([openeverest#2661](https://github.com/openeverest/openeverest/issues/2661))
+resolves them by sharing only React and design tokens.
+
+**Delivery model:**
+
+| Owned by | What | How it reaches the plugin |
+|---|---|---|
+| Host | React runtime (`react`, `react-dom`, `react/jsx-runtime`) | Browser import map resolving to the host's single React instance (§9.3) |
+| Host | Design tokens: palette, typography, corner radius, light/dark | `--everest-*` CSS variables on `:root` and `data-everest-color-scheme` on `<html>` (§9.4) |
+| Plugin | MUI, Emotion, icons, any other UI library | Bundled into the plugin at the version the plugin pins |
+| Plugin | Its MUI theme | Built at runtime by `PluginThemeProvider` from `@openeverest/plugin-theme`, reading the host tokens |
+
+Consequences:
+
+- The host can upgrade MUI or change its theme internals; already-built plugins
+  keep working and keep following the host palette and dark mode.
+- Each plugin upgrades MUI on its own schedule. The only runtime shared with the
+  host is the React major — the **UI contract** (§9.5).
+- Each plugin downloads its own MUI and Emotion (roughly 75–110 kB gzip per
+  bundle). This is the price of upgrade independence (see §19, bundle size).
 
 **Required:**
 
-- **MUI components only.** Use `@mui/material` (provided by the host via import
-  map) for all UI elements — buttons, tables, dialogs, forms, typography, icons.
-  Do not import alternative component libraries (Ant Design, Chakra, etc.).
-- **Host theme.** Use the host's MUI `ThemeProvider` context (automatically
-  inherited). Do not override `createTheme()` or inject competing theme
-  providers. Access theme tokens via `useTheme()` or the `sx` prop.
-- **`sx` prop and `styled()` for styling.** Use MUI's `sx` prop or the `styled`
-  utility (Emotion-based, shared with the host) for custom styles. Do not
-  introduce separate CSS-in-JS runtimes (styled-components, Tailwind runtime,
-  Stitches, etc.) — multiple runtimes cause specificity conflicts and increase
-  bundle size.
-- **No global CSS.** Do not inject `<style>` tags, import `.css` files that
-  produce global selectors, or manipulate `document.styleSheets`. Global styles
-  can break the host or other plugins. Scoped styles via `sx`/`styled` are the
-  only permitted approach.
+- **MUI for UI.** Use `@mui/material` for all UI elements — buttons, tables,
+  dialogs, forms, typography. The plugin installs and bundles it itself (§9.3).
+  Do not use alternative component libraries (Ant Design, Chakra, etc.).
+- **Wrap every root in `PluginThemeProvider`.** Every component the plugin
+  registers renders its tree inside `PluginThemeProvider` from
+  `@openeverest/plugin-theme`, with the plugin's `cacheKey` and
+  `nonce={api.cssNonce}` (§9.4). Do not wrap plugin UI in your own
+  `ThemeProvider` / `createTheme()`: the palette would stop following the host.
+  Read theme values with `useTheme()` or the `sx` prop.
+- **`sx` prop and `styled()` for styling.** Use MUI's `sx` prop or `styled`
+  for custom styles; they go through the plugin's own Emotion cache, which
+  `PluginThemeProvider` namespaces with `cacheKey`. Do not introduce separate
+  CSS-in-JS runtimes (styled-components, Tailwind runtime, Stitches, etc.) —
+  multiple runtimes cause specificity conflicts and increase bundle size.
+- **No global CSS.** Do not import `.css` files that produce global selectors,
+  add `CssBaseline` or `GlobalStyles`, write custom properties to `:root`, or
+  manipulate `document.styleSheets`. The host owns document-level styles.
+  Exception: a third-party library's own stylesheet whose selectors are all
+  scoped under that library's classes (e.g. `.react-flow`) may be inlined as a
+  `<style nonce={api.cssNonce}>` inside the plugin tree, because library-mode
+  builds emit no CSS file the host would load.
 - **Design tokens over magic values.** Reference `theme.palette`, `theme.spacing`,
   `theme.typography`, and `theme.shape` rather than hard-coding pixel values,
-  hex colours, or font families. This ensures plugins respect light/dark mode and
-  future theme changes.
+  hex colours, or font families. Outside MUI (charts, diagrams, plain CSS), use
+  the `--everest-*` variables directly (§9.4). This ensures plugins respect
+  light/dark mode and future theme changes.
 - **Layout patterns.** Use MUI layout primitives (`Box`, `Stack`, `Grid`,
   `Container`) for page structure. Follow the host's existing spacing rhythm
   (typically `theme.spacing(2)` / `theme.spacing(3)` between sections).
-- **Icons.** Use `@mui/icons-material` (provided by the host). For custom icons
-  not in the MUI set, use inline SVG wrapped in `SvgIcon`.
+- **Icons.** Use `@mui/icons-material`, installed by the plugin at the same
+  major as its `@mui/material`. For custom icons not in the MUI set, use inline
+  SVG wrapped in `SvgIcon`.
 
 **Prohibited:**
 
@@ -340,18 +372,44 @@ core UI — plugins feel native, not bolted on.
 - Injecting a separate CSS reset or normalise stylesheet.
 - Using `!important` overrides on host elements.
 - Rendering outside the plugin's mounted container (e.g., appending to
-  `document.body` directly). Use MUI `Portal` if an overlay is needed.
-- Bundling custom fonts. Plugins inherit the host's font stack.
+  `document.body` directly). Use MUI `Portal` (or MUI components that portal,
+  such as `Dialog`, `Menu`, `Tooltip`) if an overlay is needed.
+- Bundling custom fonts. Plugins inherit the host's font stack via the tokens.
+- Reading the host's `--mui-*` variables or relying on the host's React theme
+  context. They are MUI internals of the host and can change on a host MUI
+  upgrade; `--everest-*` is the stable contract.
+- Enabling MUI `cssVariables` in a plugin theme. It writes `--mui-*` variables
+  to `:root`, where they collide with the host's.
+
+**What the plugin inherits from the host today:**
+
+| Inherited (via `--everest-*`) | Not inherited yet |
+|---|---|
+| Palette `primary`, `secondary`, `error`, `warning`, `info`, `success` (main/dark/light) | Component style overrides of the core theme (e.g. the core's pill-shaped `Button`, `Chip`, `Card`, `Dialog`, input and table styling) |
+| Text (primary/secondary/disabled), background (default/paper), divider | Custom typography variants (e.g. `helperText`) |
+| Typography per variant: family, size, weight, line height, letter spacing, text transform | Shadows/elevation, grey scale, action states (hover/selected/disabled) |
+| Corner radius (`theme.shape.borderRadius`) | Breakpoints, z-index, transitions (plugins get MUI defaults, which currently match the host) |
+| Light/dark mode, switching live without a reload | |
+
+Tokens are additive: new groups can be published without breaking existing
+plugins (§19).
 
 **Enforcement:**
 
 - The `everestctl extension lint` command (P1 DX tooling) will statically analyse
-  the bundle for prohibited imports and global CSS injection patterns.
-- The `@openeverest/plugin-sdk/testing` mock host renders plugins inside a real
-  `ThemeProvider` so visual regressions are caught in plugin unit tests.
+  the bundle for prohibited imports and global CSS injection patterns, and for
+  the bundle rules in §9.3 (only host-provided bare imports, no CommonJS
+  `require("react")`, a single copy of MUI and Emotion).
+- The `@openeverest/plugin-sdk/testing` mock host publishes the `--everest-*`
+  tokens, so plugin unit tests render with the host look and catch visual
+  regressions.
 - The Plugin SDK's TypeScript types guide authors toward the correct patterns
   at compile time (e.g., extension-point components receive `sx`-compatible
   props rather than `className`).
+- A reference compatibility suite (`ui/plugin-compat` in the core repo, branch
+  `poc/plugin-mui-isolation`) loads prebuilt plugin bundles under hosts built
+  with different MUI majors and checks theming, dark mode, portals, style
+  isolation and that the host is left untouched.
 
 ## 9. Frontend SDK & Loading Model
 
@@ -360,27 +418,34 @@ core UI — plugins feel native, not bolted on.
 **Decision: dynamic ESM module loading (Headlamp model), not iframes.**
 
 Rationale:
-- Tight UX integration — shared MUI theme, React context, router state.
+- Tight UX integration — host-themed UI, shared React context, router state.
 - Iframes break deep-link navigation, inject a separate auth session, and cannot contribute sidebar entries or theme overrides in a seamless way.
-- Import maps let the host provide singleton instances of `react`, `react-dom`, `@mui/material`, and `react-router` so plugin bundles stay small and the host retains control over versions.
+- A browser import map lets the host provide its single React instance (`react`, `react-dom`, `react/jsx-runtime`), so hooks and context work across the host/plugin boundary. MUI and Emotion are deliberately **not** shared: each plugin bundles its own copy (§8.1, §9.3), so host UI upgrades never break already-built plugins.
 
 At shell startup:
 
 ```
-1. GET /v1/clusters/{cluster}/plugins  →  [{ name, bundleUrl, extensionPoints }, ...]
+1. GET /v1/clusters/{cluster}/plugins  →  [{ name, bundleUrl, extensionPoints,
+                                              compatibleHostVersions,
+                                              compatibleUiContractVersions }, ...]
 2. For each enabled plugin:
+     skip it (console error) if its UI-contract or host-version range excludes this host (§9.5)
      const mod = await import(bundleUrl)   // dynamic ESM import
-     mod.default(pluginApi)               // calls register(api)
-3. Plugin calls api.registerExtension("clusterDetailTab", MyComponent)
+     (mod.default ?? mod.register)(pluginApi)
+3. Plugin calls api.registerExtension({ type: "clusterDetailTab", component: MyComponent, ... })
 4. Shell renders registered components at the declared extension points.
 ```
+
+All enabled bundles are currently loaded eagerly after login. Loading them per
+extension point, only when one is about to render, is a planned follow-up (§19).
 
 #### Host-component rendering & isolation
 
 The shell never mounts a plugin component directly into a core page. Every
 registered contribution is rendered through a dedicated **host component** that
 owns the mount point, injects the extension-point props, and provides the shared
-React context (theme, router, auth). Each extension-point type has its own host
+React context (router, auth). The theme is not shared through React context: the
+plugin supplies its own via `PluginThemeProvider` (§9.4). Each extension-point type has its own host
 wrapper — e.g., a route host for `route`, a tab host for `clusterDetailTab`, a
 settings host for `settingsPanel`.
 
@@ -421,17 +486,264 @@ useCluster(id: string): DatabaseCluster | undefined
 useNamespaces(): string[]
 useRBAC(): { can: (verb: string, resource: string) => boolean }
 
-// Re-exported singletons (resolved from host import map)
-export { React, ReactDOM, MUI, ReactRouter }
+// Also on the PluginApi passed to register(api):
+React: typeof import('react')        // the host React (same instance the import map serves)
+fetch(path, init?): Promise<Response> // authenticated call to this plugin's backend via the proxy
+cssNonce: string                     // CSP nonce for <style> tags; pass to PluginThemeProvider
+hostVersion: string                  // host application version, "dev" when unknown
+uiContractVersion: string            // shared React major, e.g. "18" (§9.5)
 ```
+
+The SDK is types plus the `register` contract; it has no runtime dependency on
+MUI. Theming lives in a separate package, `@openeverest/plugin-theme` (§9.4).
 
 ### 9.3 Bundle requirements
 
-Plugin authors produce a single ESM file with:
+Plugin authors produce a single ESM file:
 
-- Default export: `register(api: PluginApi): void`
-- No bundled copies of `react`, `@mui/material`, or `react-router` — import them from the SDK re-exports so the import map resolves to the host's singleton.
-- Target: `esnext` modules, no dynamic `require()`.
+- **Entry.** Default export `register(api: PluginApi): void` (a named
+  `register` export is also accepted). Conventionally `main.js`, served at
+  `spec.frontend.bundlePath`.
+- **Format.** ES module, `esnext` target, production build. The import map does
+  not provide `react/jsx-dev-runtime`, so development builds do not load.
+
+**External vs. bundled:**
+
+| Import | Treatment | Why |
+|---|---|---|
+| `react`, `react-dom`, `react/jsx-runtime` | **External** | The host import map resolves them to the host's React. A second React copy breaks hooks and context. |
+| `react-dom/client`, `react-dom/server`, `react/jsx-dev-runtime`, other React subpaths | **Do not import** | Not in the import map; the host owns the React root. |
+| `@mui/*`, `@emotion/*`, `@openeverest/plugin-theme` | **Bundle** | The plugin owns its UI stack and its version. |
+| Everything else (data fetching, charts, dates, …) | **Bundle** | — |
+
+Only the public React 18 API is available through the import map. Plugins must
+not rely on React internals.
+
+**Dependencies.** `@openeverest/plugin-theme` declares its UI stack as peer
+dependencies, so the plugin installs and pins them itself:
+
+| Peer | Range |
+|---|---|
+| `@mui/material` | `^5.15.0 \|\| ^6.0.0 \|\| ^7.0.0 \|\| ^9.0.0` |
+| `@emotion/react`, `@emotion/cache` | `^11.11.0` |
+| `react`, `react-dom` | `^18.0.0` (types and tests only; never bundled) |
+
+```json
+{
+  "dependencies": {
+    "@emotion/cache": "^11.11.0",
+    "@emotion/react": "^11.11.0",
+    "@emotion/styled": "^11.11.0",
+    "@mui/icons-material": "7.3.11",
+    "@mui/material": "7.3.11",
+    "@openeverest/plugin-theme": "^0.1.0"
+  },
+  "devDependencies": {
+    "@openeverest/plugin-sdk": "^0.4.0",
+    "@types/react": "^18.3.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "typescript": "^5.2.0",
+    "vite": "^8.0.0"
+  }
+}
+```
+
+Neither package version above is published yet: `@openeverest/plugin-theme`
+0.1.0 is new, and `cssNonce`, `hostVersion` and `uiContractVersion` land in the
+next plugin-sdk minor. Until then, link both from a core checkout with `file:`
+paths.
+
+- npm rejects a MUI version outside the peer range (`ERESOLVE`). Do not bypass
+  it with `--legacy-peer-deps` or `--force`.
+- Every other MUI package (`@mui/icons-material`, `@mui/x-date-pickers`,
+  `@mui/lab`, …) must be on the **same major** as `@mui/material`. Otherwise
+  npm installs a second `@mui/material` for it and the bundle carries two MUI
+  copies.
+- The built bundle must contain exactly one copy of `@mui/material`,
+  `@mui/system` and `@emotion/react`.
+
+**Reference Vite configuration:**
+
+```ts
+import { defineConfig } from 'vite';
+import type { Plugin } from 'vite';
+import react from '@vitejs/plugin-react-swc';
+
+// Resolved by the host import map; never bundle them.
+const HOST_PROVIDED = ['react', 'react-dom', 'react/jsx-runtime'];
+
+// A bundled CommonJS dependency that require()s React compiles to a stub that
+// throws on load, and the host only logs plugin load errors to the console.
+const failOnHostRequire = (): Plugin => ({
+  name: 'fail-on-host-require',
+  apply: 'build',
+  renderChunk(code, chunk) {
+    for (const id of HOST_PROVIDED) {
+      if (code.includes(`__require("${id}")`)) {
+        this.error(`${chunk.fileName} calls require("${id}"); alias that dependency to its ESM build`);
+      }
+    }
+    return null;
+  },
+});
+
+export default defineConfig(({ command }) => ({
+  plugins: [react(), failOnHostRequire()],
+  resolve: {
+    // Only needed when @openeverest/* packages are linked from a local checkout.
+    dedupe: ['@mui/material', '@emotion/react', '@emotion/styled', '@emotion/cache'],
+  },
+  // Library mode leaves process.env untouched, but MUI and Emotion read NODE_ENV.
+  define: command === 'build' ? { 'process.env.NODE_ENV': JSON.stringify('production') } : undefined,
+  build: {
+    lib: { entry: 'src/main.tsx', formats: ['es'], fileName: () => 'main.js' },
+    rollupOptions: { external: HOST_PROVIDED },
+  },
+}));
+```
+
+**Common build pitfalls:**
+
+- **CommonJS dependencies that `require("react")`** become a stub that throws
+  when the bundle loads; the plugin then silently fails to register. Alias them
+  to their ESM builds. Known cases: `use-sync-external-store/shim/with-selector`
+  (pulled in by zustand and `@xyflow/react`), and on MUI 5 the deep
+  `@mui/system/*` imports (alias to `@mui/system/esm/*`).
+- **CSS files.** Library-mode builds emit no CSS file the host would load.
+  Import third-party CSS with `?inline` and render it as
+  `<style nonce={api.cssNonce}>` inside the plugin tree (scoped selectors only,
+  §8.1).
+- **Static assets** (images, icons). Serve them from the plugin backend and
+  reference them via `api.basePath` (e.g. `${api.basePath}/icon.png`), or
+  inline them as `data:` URIs.
+
+**Browser constraints (host Content Security Policy):**
+
+| Directive | Value | What it means for plugins |
+|---|---|---|
+| `script-src` | `'self'` + nonce | No `eval` / `new Function`, no inline `<script>`, no scripts from other origins. |
+| `style-src` | `'self'` + nonce | Every `<style>` the plugin injects needs `api.cssNonce`; `PluginThemeProvider` passes it to Emotion. |
+| `connect-src` | `'self'` (+ the OIDC issuer) | The browser can only call the host. Use `api.fetch` for the plugin backend; external APIs are called from the backend. |
+| `img-src`, `font-src` | `'self'` `data:` | Images and fonts only from the host origin (via `api.basePath`) or `data:` URIs. |
+
+The host also sends `Cross-Origin-Embedder-Policy: require-corp` and
+`Cross-Origin-Resource-Policy: same-origin`, so cross-origin resources are
+blocked regardless.
+
+### 9.4 Theming with `@openeverest/plugin-theme`
+
+`@openeverest/plugin-theme` (core repo, `ui/packages/plugin-theme`) is the
+bridge between the host design tokens and the plugin's own MUI. It exports only
+`PluginThemeProvider`, `useHostColorMode` and the `PluginThemeProviderProps`
+type; plugins import MUI components from their own `@mui/material`.
+
+`PluginThemeProvider` reads the host's `--everest-*` variables, builds a MUI
+theme from them with the plugin's MUI, gives the plugin its own namespaced
+Emotion cache, and rebuilds the theme whenever the host switches between light
+and dark. It renders no `CssBaseline`: document-level styles belong to the host.
+
+Wrap every registered component once, typically with a small root component:
+
+```tsx
+import type { ReactNode } from 'react';
+import { PluginThemeProvider } from '@openeverest/plugin-theme';
+import { Button, Paper, Typography } from '@mui/material';
+import type { PluginApi, PluginRegisterFn } from '@openeverest/plugin-sdk';
+
+// Emotion keys allow only lowercase letters and "-"; must be unique per plugin.
+const CACHE_KEY = 'sql-explorer';
+
+let pluginApi: PluginApi;
+
+const PluginRoot = ({ children }: { children: ReactNode }) => (
+  <PluginThemeProvider cacheKey={CACHE_KEY} nonce={pluginApi.cssNonce}>
+    {children}
+  </PluginThemeProvider>
+);
+
+const SqlExplorerPage = () => (
+  <PluginRoot>
+    <Paper sx={{ p: 3 }}>
+      <Typography variant="h5">SQL Explorer</Typography>
+      <Button variant="contained">Run query</Button>
+    </Paper>
+  </PluginRoot>
+);
+
+const register: PluginRegisterFn = (api) => {
+  pluginApi = api;
+  api.registerExtension({ type: 'route', label: 'SQL Explorer', component: SqlExplorerPage });
+};
+
+export default register;
+```
+
+**`PluginThemeProvider` props:**
+
+| Prop | Required | Value |
+|---|---|---|
+| `cacheKey` | Yes | The plugin's Emotion cache key; also the class-name prefix and the `data-emotion` attribute of its `<style>` tags. Use the plugin's `metadata.name`, with anything other than lowercase letters and `-` removed or replaced (Emotion rejects digits and `_`). It must be unique across plugins and must not be the host's key (`percona-css`). Use the same key for every root of one plugin. |
+| `nonce` | Yes (under the host CSP) | `api.cssNonce`. Without it the browser blocks the plugin's styles. |
+| `children` | Yes | The plugin UI. |
+
+`useHostColorMode(): 'light' | 'dark'` returns the host's current mode and
+re-renders on change. Use it for code that doesn't go through the MUI theme
+(chart libraries, canvas drawing).
+
+**Token contract.** The host publishes these variables on `:root` and keeps them
+in sync with its theme, including on light/dark switches:
+
+| Variable | Value |
+|---|---|
+| `--everest-color-{primary,secondary,error,warning,info,success}-{main,dark,light}` | Palette colours |
+| `--everest-color-text-{primary,secondary,disabled}` | Text colours |
+| `--everest-color-background-{default,paper}` | Background colours |
+| `--everest-color-divider` | Divider colour |
+| `--everest-radius` | Corner radius, unitless pixels (e.g. `4`) |
+| `--everest-font-{variant}-{family,size,weight,line-height,letter-spacing,transform}` | Typography per variant, for `h1`–`h6`, `subtitle1`, `subtitle2`, `body1`, `body2`, `button`, `caption`, `overline` |
+
+and the active mode as `data-everest-color-scheme="light" | "dark"` on `<html>`.
+
+Outside MUI (plain CSS, third-party components) plugins may use the variables
+directly, e.g. `color: var(--everest-color-text-secondary)`. Inside MUI code,
+prefer `theme.palette.*`: MUI's colour helpers (`alpha`, `darken`, `lighten`)
+cannot parse `var(...)` values.
+
+The variable names are a **public contract**. New variables can be added at any
+time without breaking plugins; renaming or removing one is a breaking host
+change.
+
+### 9.5 Compatibility & versioning
+
+A plugin frontend is checked on two independent axes when the host loads it:
+
+| Axis | Plugin declares (`Plugin` CR) | Host exposes | Guards against |
+|---|---|---|---|
+| UI contract | `spec.compatibleUiContractVersions` | `api.uiContractVersion` (React major) | The shared React major changing |
+| Host API | `spec.compatibleHostVersions` | `api.hostVersion` | Host API / extension-point changes |
+
+- Ranges use npm semver syntax with **full `x.y.z` versions**, e.g.
+  `">=18.0.0 <19.0.0"` or `"^18.0.0"`. Shorthand such as `">=19"` or `"18.x"` is
+  currently not enforced (the check passes), so always spell out full versions.
+- An empty range always passes. On a development host (`hostVersion` is `dev`
+  or `0.0.0`) the host-version check is skipped.
+- A plugin that fails either check is skipped with a console error; the rest of
+  the UI keeps working.
+
+**Host UI upgrades.** Because each plugin bundles its own MUI, a host MUI upgrade
+needs no action from plugin authors. This was verified by loading plugin bundles
+built with MUI 5.18, 6.5, 7.3 and 9.4, unchanged, under hosts built with MUI 6.5,
+7.3 and 9.4: theming, live dark mode, portals, style isolation and the host's own
+styling behaved the same on every host. A host **React major** upgrade is
+different: it changes the UI contract, and plugins must declare the ranges they
+support.
+
+**Plugin MUI upgrades** are the plugin's own migration, done on its own
+schedule; MUI removes deprecated APIs between majors (e.g. `PaperProps` and
+`inputProps` are gone in MUI 9). `@openeverest/plugin-theme`'s peer range says
+which MUI majors it supports; widening that range is a non-breaking release of
+the package.
 
 ## 10. Backend Model
 
@@ -886,6 +1198,7 @@ Backend and CLI images are separate OCI images referenced by digest from `manife
 
 - Plugins are versioned with SemVer.
 - `spec.compatibleHostVersions` is a semver range (same syntax as npm).
+- `spec.compatibleUiContractVersions` is a semver range over the host's React major (§9.5). Both ranges are also checked when the UI loads the bundle.
 - The host rejects installation of a plugin whose range does not include the running host version.
 - Plugins are upgraded independently of the host: `everestctl extension upgrade <name>`.
 
@@ -907,6 +1220,8 @@ The `--from-tar` flag pushes images into the in-cluster registry if one is confi
 |---|---|
 | Malicious frontend bundle | Bundles served through host proxy (not a CDN); SRI hash in manifest verified before serving; strict CSP allows only host origin. |
 | XSS via plugin code | Plugin JS runs in the same origin — normal XSS mitigations apply (React escaping, CSP). Considered acceptable given admin-only install gate. |
+| Plugin tampering with the shared runtime | The React runtime the host shares through the import map (`window.__EVEREST_PLUGIN_RUNTIME__`) is frozen and non-writable, so one plugin cannot swap React for the others. This is a robustness measure, not a security boundary: plugin code still runs with the user's full session, so trust is anchored at install time (admin-only install, curated catalog, and later bundle signing / SRI). |
+| Style interference between plugins and the host | Each plugin styles through its own Emotion cache (unique `cacheKey`, §9.4) and may not inject global CSS or write to `:root` (§8.1). |
 | Credential exfiltration | Plugin backends never receive raw DB credentials; only short-lived, scoped JWTs. DB connection details brokered on-demand via `/v1/databases/{id}/connection-details`. |
 | Privilege escalation | All plugin API calls re-checked against the acting user's own RBAC. Plugin cannot escalate beyond the user's permissions. |
 | In-cluster lateral movement | Plugin backend runs in its own `ServiceAccount` with a minimal `Role` auto-generated from `spec.permissions`. `NetworkPolicy` restricts egress to declared endpoints only. |
@@ -1000,7 +1315,7 @@ graph TB
    Subcommand-via-shellout to a plugin-declared OCI image. `everestctl extension run <name> -- <args>` execs the container with a short-lived API token injected. (See §12 for details.)
 
 8. **How are plugins versioned independently of the host?**
-   SemVer on the plugin; `spec.compatibleHostVersions` semver range in the manifest; host enforces the range at install time. Plugins upgrade independently via `everestctl extension upgrade`.
+   SemVer on the plugin; `spec.compatibleHostVersions` semver range in the manifest; host enforces the range at install time and again when the UI loads the bundle, together with `spec.compatibleUiContractVersions` (§9.5). Plugins upgrade independently via `everestctl extension upgrade`, and bundle their own MUI so host UI upgrades don't force a plugin rebuild (§8.1).
 
 9. **Are there categories of plugins we would explicitly disallow?**
    Yes: plugins may not write to `DatabaseCluster`, `Instance`, `Provider`, or any other spec 001 CRs. The RBAC policy for the auto-generated plugin `ServiceAccount` excludes `create`, `update`, `patch`, and `delete` verbs on those resource types unconditionally. The same denylist applies to the daemon plugin service token (§10.4) regardless of what the manifest declares.
@@ -1191,7 +1506,7 @@ Total DX investment: **roughly 4–6 person-weeks for P0, plus another 4–6 for
 
 4. **Plugin-to-plugin communication**: should plugins be allowed to call each other's backends via `/v1/clusters/{cluster}/plugins/{otherName}/*`? If yes, the requesting plugin must have `use` on the target plugin and carry a valid user session. Decision deferred to Phase 5.
 
-5. **Bundle size / performance**: no size limit defined yet. Large bundles delay shell startup. Consider a lazy-load model where extension-point components are loaded only when the user navigates to the relevant page (route-level code splitting within the plugin bundle).
+5. **Bundle size / performance**: no size limit defined yet. Each bundle carries its own MUI and Emotion (roughly 75–110 kB gzip), and all enabled bundles are currently loaded eagerly after login, so N installed plugins cost N downloads and N style caches even on pages that show none of them. Planned follow-up: build sidebar entries and routes from the descriptor's `extensionPoints` and `import()` a bundle only when one of its extension points is about to render (cached, loaded at most once), with an eager fallback for plugins that declare no extension points.
 
 6. **Event retention window**: bounded by the kube watch cache window (default 5 minutes on the kube API server, configurable). Plugins that have been disconnected longer must do the snapshot-then-watch fallback (§10.6). No separate retention policy needed in OpenEverest — etcd is the source of truth and the watch cache covers the gap.
 
@@ -1206,6 +1521,8 @@ Total DX investment: **roughly 4–6 person-weeks for P0, plus another 4–6 for
 11. **Dynamic informer lifecycle**: `controller-runtime` assumes static type registration at manager startup. Plugin CRDs require either restarting the manager (disruptive) or using raw `dynamic.Interface` + custom informers outside the manager. The latter is feasible (Crossplane, KubeVela use this pattern) but loses some controller-runtime ergonomics. Prototype needed in Phase 6.
 
 12. **Presets: core CRD vs. plugin CRD**: Presets could be shipped as either a first-class core CRD (like Instance, Provider) or as the first stateful plugin exercising the Phase 6 mechanism. Core CRD ships faster and integrates tighter with Instance validation; plugin CRD validates the extensibility model. Decision: start with a core `Preset` CRD to unblock the feature quickly, then optionally migrate to a plugin once Phase 6 lands — or keep it core if the tight validation integration proves essential.
+
+13. **Sharing more of the core look**: plugins inherit palette, typography, radius and dark mode (§8.1), but not the core theme's component style overrides (e.g. the pill-shaped `Button`) or shadows, grey scale and action states. Options: (a) publish more `--everest-*` tokens (additive, independent of MUI version); (b) have `@openeverest/plugin-theme` ship the core's component overrides as theme options, which ties those releases to MUI's theme format and may narrow its peer range; (c) a separate package of core-styled components on a pinned MUI. (a) first, (b) when a plugin needs the component look.
 
 ## 20. Definition of Done
 
