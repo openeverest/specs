@@ -3,7 +3,7 @@
 *   **Status:** Draft
 *   **Authors:** @chilagrow
 *   **Created:** 2026-06-30
-*   **Last Updated:** 2026-08-12
+*   **Last Updated:** 2026-10-09
 *   **Related Issues:** https://github.com/openeverest/openeverest/issues/1798, https://github.com/openeverest/openeverest/issues/2471
 
 
@@ -47,13 +47,13 @@ metadata:
   labels:
     openeverest.io/managed: "true"                             # Created via OpenEverest API
     openeverest.io/provider: "provider-percona-server-mongodb" # Provider name (same as spec.provider in Instance CR)
-    openeverest.io/definition: "splithorizon-tls"                # Resource definition for filtering
+    openeverest.io/definition: "splithorizon-tls"                # Resource definition, used for filtering and validation
 ```
 
 **Label meanings:**
 - `openeverest.io/managed: "true"` — Secrets and ConfigMaps created by OpenEverest API
 - `openeverest.io/provider` — Provider that uses Secrets and ConfigMaps type
-- `openeverest.io/definition` — Secrets and ConfigMaps definition for filtering (e.g., `splithorizon-tls`, `import-credentials`)
+- `openeverest.io/definition` — Matches `Provider.spec.secrets.<definition>`, used for filtering and validation of keys
 
 ### 4.2. API Endpoints
 
@@ -65,7 +65,7 @@ metadata:
 | GET | `/clusters/{cluster}/namespaces/{ns}/secrets` | List secrets (only metadata without content) |
 | GET | `/clusters/{cluster}/namespaces/{ns}/secrets/{name}` | Get secret (only metadata data) |
 | DELETE | `/clusters/{cluster}/namespaces/{ns}/secrets/{name}` | Delete secret |
-| GET | `/clusters/{cluster}/providers/{name}` | Get secret UI schema definitions |
+| GET | `/clusters/{cluster}/providers/{name}` | Get secret OpenAPI schema and UI schema definitions |
 
 #### ConfigMaps
 
@@ -75,7 +75,7 @@ metadata:
 | GET | `/clusters/{cluster}/namespaces/{ns}/config-maps` | List configmaps |
 | GET | `/clusters/{cluster}/namespaces/{ns}/config-maps/{name}` | Get configmap (includes data) |
 | DELETE | `/clusters/{cluster}/namespaces/{ns}/config-maps/{name}` | Delete configmap |
-| GET | `/clusters/{cluster}/providers/{name}` | Get configmap UI schema definitions |
+| GET | `/clusters/{cluster}/providers/{name}` | Get configmap OpenAPI schema and UI schema definitions |
 
 #### `POST /clusters/{cluster}/namespaces/{ns}/secrets`
 
@@ -126,20 +126,7 @@ For plaintext request:
 }
 ```
 
-**Conflict Handling:**
-
-If a secret with the same name already exists, the API server applies the following logic:
-
-**Check owner reference**: If the existing secret has an owner reference set:
-- Return `409 CONFLICT` with message: "Secret is owned by another resource"
-- User must choose a different name or delete the owning Instance first
-
-**Orphaned secret**: If no owner reference and not in use:
-- Delete the existing orphaned secret
-- Create the new secret with the provided configuration
-- Return `201 CREATED`
-
-This prevents race conditions and ensures secrets are not accidentally overwritten while in use.
+If a secret with the same name already exists, the API server return `409 CONFLICT`.
 
 Response strips `data` and `stringData`:
 ```json
@@ -210,9 +197,9 @@ If the secret was found, but does not contain the label `"openeverest.io/managed
 
 #### `DELETE /clusters/{cluster}/namespaces/{ns}/secrets/{name}`
 
-On success, returns 204 with no body.
+On success, returns NO CONTENT 204 with no body.
 
-If the secret has owner reference, it returns CONFLICT 409.
+If the secret has finalizer, it returns ACCEPTED 202.
 
 If the secret was found, but does not contain the label `"openeverest.io/managed": "true"`, it returns 404.
 
@@ -250,7 +237,7 @@ If the secret was found, but does not contain the label `"openeverest.io/managed
           "components": { ... }
         }
       },
-      "import-credentials": {
+      "user": {
         "parametersSchema": {
           "openAPIV3Schema": { ... }
         },
@@ -275,7 +262,7 @@ If the secret was found, but does not contain the label `"openeverest.io/managed
 
 **Label examples:**
 - Component secret: `"openeverest.io/definition": "splithorizon-tls"`
-- Import credential: `"openeverest.io/definition": "import-credentials"`
+- Import credential: `"openeverest.io/definition": "user"`
 
 #### Query Parameters (List)
 
@@ -333,7 +320,7 @@ spec:
     engine:
       ...
     splithorizon:
-      config:
+      parameters:
         secretRef:
           name: my-splithorizon
 ```
@@ -357,8 +344,9 @@ data:
 
 #### Import Example
 
-For import, instance creation flow (or separate flow as currently done in OpenEverest v1) require additional steps to populate necessary secrets.
-The example secret `my-mongo-cluster-import-creds` is used only by this instance.
+For import, instance creation flow require additional steps to populate necessary secrets.
+
+The example secret `my-mongo-cluster-import-creds` is assigned, the secret may be used by more than one Instance.
 
 ```
 apiVersion: instance.openeverest.io/v1alpha1
@@ -372,14 +360,8 @@ spec:
   components:
     ...
 
-  dataSource:
-    type: Import # NEW
-    import: # NEW
-      backupClassName: psmdb-mongoimport-import
-      storageName: s3-external-data
-      config:
-        path: /imports/users.json
-        credentialsSecretName: my-mongo-cluster-import-creds
+  userSecretRef:
+    name: my-mongo-cluster-import-creds
 ```
 
 Below is the content of an example of the secret:
@@ -392,7 +374,7 @@ metadata:
   namespace: production
   labels:
     openeverest.io/provider: percona-server-mongodb
-    openeverest.io/definition: import-credentials
+    openeverest.io/definition: user
 type: Opaque
 data:
   MONGODB_BACKUP_USER: "backup"
@@ -403,6 +385,7 @@ data:
   MONGODB_CLUSTER_MONITOR_PASSWORD: "<secure-password>"
   MONGODB_DATABASE_ADMIN_USER: "databaseAdmin"
   MONGODB_DATABASE_ADMIN_PASSWORD: "<secure-password>"
+  MONGODB_USER_ADMIN_USER: "userAdmin"
   MONGODB_USER_ADMIN_PASSWORD: "<secure-password>"
 ```
 
@@ -415,7 +398,7 @@ Providers define Secret and ConfigMap types in separate definition files, simila
 ```
 definition/
   secrets/
-    import-credentials/
+    user/
       definition.yaml  # Schema configuration
       ui.yaml          # UI rendering hints
       types.go         # Go types for schema validation
@@ -430,15 +413,15 @@ definition/
 
 **definition.yaml:**
 ```yaml
-# definition/secrets/import-credentials/definition.yaml
+# definition/secrets/user/definition.yaml
 parametersSchema:
-  openAPIV3Schema: ImportCredentialsConfig
+  openAPIV3Schema: UserSecretData
 ```
 
 **ui.yaml:**
 ```yaml
-# definition/secrets/import-credentials/ui.yaml
-label: "Import Credentials"
+# definition/secrets/user/ui.yaml
+label: "User Credentials"
 componentsOrder:
   - backupUser
   - backupPassword
@@ -448,6 +431,7 @@ componentsOrder:
   - clusterMonitorPassword
   - databaseAdminUser
   - databaseAdminPassword
+  - userAdminUser
   - userAdminPassword
 components:
   backupUser:
@@ -506,6 +490,13 @@ components:
       label: "Database Admin Password"
     validation:
       required: true
+  userAdminUser:
+    uiType: text # TODO: use base64 encoded text
+    path: "data.MONGODB_USER_ADMIN_USER" # use stringData for text, data for base64 encoded text
+    fieldParams:
+      label: "User Admin User"
+    validation:
+      required: true
   userAdminPassword:
     uiType: text # TODO: use base64 encoded text
     path: "data.MONGODB_USER_ADMIN_PASSWORD" # use stringData for text, data for base64 encoded text
@@ -517,7 +508,7 @@ components:
 
 **types.go:**
 ```go
-// definition/secrets/import-credentials/types.go
+// definition/secrets/user/types.go
 package importcredentials
 
 // ImportCredentialsConfig describes the expected data keys for this secret type.
@@ -531,8 +522,51 @@ type ImportCredentialsConfig struct {
     MongoDBClusterMonitorPassword string `json:"MONGODB_CLUSTER_MONITOR_PASSWORD"`
     MongoDBDatabaseAdminUser     string `json:"MONGODB_DATABASE_ADMIN_USER"`
     MongoDBDatabaseAdminPassword string `json:"MONGODB_DATABASE_ADMIN_PASSWORD"`
+    MongoDBUserAdminUser          string `json:"MONGODB_USER_ADMIN_USER"`
     MongoDBUserAdminPassword     string `json:"MONGODB_USER_ADMIN_PASSWORD"`
 }
+```
+
+**provider CR**
+
+The Provider returns OpenAPI schema and UI schema.
+
+```
+apiVersion: core.openeverest.io/v1alpha1
+kind: Provider
+metadata:
+  name: percona-server-mongodb
+  ...
+spec:
+  secrets:
+    user:
+      parametersSchema:
+        openAPIV3Schema:
+          properties:
+            MONGODB_BACKUP_PASSWORD:
+              type: string
+            MONGODB_BACKUP_USER:
+              type: string
+            MONGODB_CLUSTER_ADMIN_PASSWORD:
+              type: string
+            MONGODB_CLUSTER_ADMIN_USER:
+              type: string
+            MONGODB_CLUSTER_MONITOR_PASSWORD:
+              type: string
+            MONGODB_CLUSTER_MONITOR_USER:
+              type: string
+            MONGODB_DATABASE_ADMIN_PASSWORD:
+              type: string
+            MONGODB_DATABASE_ADMIN_USER:
+              type: string
+            MONGODB_USER_ADMIN_PASSWORD:
+              type: string
+            MONGODB_USER_ADMIN_USER:
+              type: string
+            PMM_SERVER_TOKEN:
+              type: string
+          type: object
+...
 ```
 
 #### Component UI Schema Reference
@@ -550,34 +584,30 @@ ui:
         importCredentials:
           uiType: secret # New - may change
           path: spec.dataSource.import.config.credentialsSecretName # New: does not exist yet and may change
-          definition: import-credentials  # New: References definition/secrets/import-credentials
+          definition: user  # New: References definition/secrets/user
           fieldParams:
             label: "Import Credentials"
             createLabel: "+ Add New Credentials" # New - may change
-          dataSource: # Fetch from `GET /secrets?provider=provider-percona-server-mongodb&definition=import-credentials`
+          dataSource: # Fetch from `GET /secrets?provider=provider-percona-server-mongodb&definition=user`
             # TODO: to match v1 implementation dataSource won't be necessary
           validation:
             required: true
 ```
 
 **How it works:**
-1. Dropdown populated via `GET /secrets?provider=provider-percona-server-mongodb&definition=import-credentials`
+1. Dropdown populated via `GET /secrets?provider=provider-percona-server-mongodb&definition=user`
 2. Shows existing secrets matching the definition
-3. "Add New" button opens creation modal rendered from `definition/secrets/import-credentials/ui.yaml`
-4. Schema validation uses `definition/secrets/import-credentials/secret.yaml` config
+3. "Add New" button opens creation modal rendered from `definition/secrets/user/ui.yaml`
+4. Schema validation uses `definition/secrets/user/secret.yaml` config
 
 ### 4.5. Settings
 
 **Lifecycle Management:**
 
-Some Secrets and ConfigMaps are shared across multiple Instances (e.g., SplitHorizon TLS certificates) and should persist after individual Instances are deleted.
-Others are Instance-specific (e.g., database user credentials) and should be deleted when their owning Instance is removed.
-Providers control lifecycle behavior by configuring whether to set owner references on Secrets and ConfigMaps.
-Either owner reference to Instance or finalizers are set by the providers.
-Resources with owner references are automatically garbage-collected when the owning Instance is deleted.
+All Secrets and ConfigMaps are owned by users, Provider will not delete them and persists after individual Instances are deleted.
+Finalizers may be set by the providers.
 
 A Settings page is provided in the OpenEverest UI to manage Secrets and ConfigMaps that are no longer needed.
-It allows viewing and deleting Secrets and ConfigMaps shared by multiple Instances.
 
 Under Settings, a dedicated management page allows users to view and manage Secrets and ConfigMaps:
 
@@ -588,7 +618,7 @@ Under Settings, a dedicated management page allows users to view and manage Secr
 **Layout:**
 - **Tabs**: resources are grouped by:
   1. **Provider** (e.g., "provider-percona-server-mongodb")
-  2. **Definition** within each provider (e.g., "splithorizon-tls", "import-credentials")
+  2. **Definition** within each provider (e.g., "splithorizon-tls", "user")
 
 The list view displays each item and following actions: 
 - **View**: GET (Secret data is not shown for security)
@@ -632,10 +662,8 @@ OpenEverest uses Casbin's RBAC with resource-based access control:
 - [ ] API endpoints implemented for ConfigMaps (Create, List, Get, Delete)
 - [ ] Labels applied correctly on Secrets and ConfigMaps creation
 - [ ] Management UI in Settings for viewing, updating, and deleting Secrets/ConfigMaps
-- [ ] Delete prevents deletion of in-use resources
 - [ ] RBAC roles and permissions configured for Secrets and ConfigMaps
 - [ ] UI renders forms from provider UI schema
-- [ ] PSMDB provider defines resource types for splithorizon component
 - [ ] Integration tests for API and RBAC
 
 ## 6. Alternatives Considered
