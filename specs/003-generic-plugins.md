@@ -990,7 +990,7 @@ Consequences:
 Some plugins need persistent, structured, namespace-scoped state that goes beyond what a ConfigMap or a plugin-managed database provides. Examples:
 
 - **Presets** — named configuration templates that pre-fill `InstanceSpec` fields during instance creation.
-- **Database user management** — CRs representing logical database users, reconciled by a plugin that provisions credentials in the target engines.
+- **Instance user management** — `InstanceUser` CRs representing users of an instance (logical database users, or API keys for models served through the AI Gateway), reconciled by a plugin that provisions credentials in the target engines.
 - **Migration configs** — declarative schema migration state for a schema-management plugin.
 
 These plugins are called **stateful plugins**. They declare custom resource schemas in the `Plugin` manifest; the host installs, validates, and watches those CRDs; reconciliation events are forwarded to the plugin backend as HTTP callbacks. **No per-plugin operator is required.**
