@@ -3,7 +3,7 @@
 *   **Status:** Draft
 *   **Authors:** @spron-in
 *   **Created:** 2026-06-17
-*   **Last Updated:** 2026-10-20
+*   **Last Updated:** 2026-10-25
 *   **Related Issues:** openeverest/openeverest#1815
 *   **Related specs:** [001 — Modular core / Provider plugins](./001-plugins-architecture.md), [003 — Generic plugins](./003-generic-plugins.md)
 
@@ -11,9 +11,9 @@
 
 ## 1. Summary
 
-This spec describes a plugin that manages **database users and roles** inside OpenEverest `Instance`s.
+This spec describes a plugin that manages **users and roles of OpenEverest `Instance`s**: accounts inside databases, and API keys for models served by provider-kserve.
 
-It adds two namespaced custom resources, `DatabaseUser` and `DatabaseRole`, and runs its own controller to reconcile them. It also provides a REST API and a per-instance **Users** tab in the UI.
+It adds two namespaced custom resources, `InstanceUser` and `InstanceRole`, and runs its own controller to reconcile them. It also provides a REST API and a per-instance **Users** tab in the UI. The kinds are named after `Instance`, not after databases, because a user of a model is an API key, not a database account (§4.6).
 
 Users that the operators create by default (superusers, monitoring and replication accounts) are listed as **read-only system users**. The plugin never changes them.
 
@@ -24,7 +24,7 @@ Engine-specific work sits behind two layers:
 
 Adding a provider for an engine that already has a dialect is a configuration change. Adding a new database technology means one new dialect package. Neither requires changes to the UI or the architecture.
 
-The MVP targets **CloudNativePG, MariaDB and Percona Server for MongoDB**. It requires **no changes to OpenEverest core or provider-sdk**.
+The MVP targets **CloudNativePG, MariaDB and Percona Server for MongoDB**, plus **provider-kserve** for model API keys. It requires **no changes to OpenEverest core or provider-sdk**.
 
 ## 2. Motivation
 
@@ -37,12 +37,15 @@ None of this is uniform, none of it is visible in the OpenEverest UI, and most o
 
 The `{instance}-conn` Secret makes the problem worse. On some providers it holds the superuser (`postgres`, `root`), so applications end up running as superuser by default.
 
+Models have the same problem. provider-kserve exposes `llm` and `predictor` Instances through the Envoy AI Gateway with **one API key per model**, kept in the Instance's connection Secret. Every application that calls the model shares that key. One consumer can't be revoked without breaking all of them, and token quotas and usage metrics can't tell consumers apart. An API key per consumer is the same thing as a user per application of a database, so it belongs in this plugin rather than in a separate API.
+
 **User stories:**
 
 1. *As a developer*, I open my instance, go to **Users**, click **Create user**, pick "read/write on `orders`", and get a Secret my app can mount.
 2. *As a DBA*, I define a `reporting` role once and assign it to several users.
 3. *As a platform engineer*, I manage users and roles in Git as CRs, next to the `Instance`.
 4. *As an operator of OpenEverest*, I can see which accounts the database operator created and reveal their credentials, but I can't break them by accident.
+5. *As an ML platform owner*, I open a model Instance, go to **Users**, and create an API key for each application that calls the model, so I can revoke, rate-limit and meter each one separately.
 
 ## 3. Goals & Non-Goals
 
@@ -71,7 +74,7 @@ The `{instance}-conn` Secret makes the problem worse. On some providers it holds
 * SSO / LDAP / OIDC federation (later phase).
 * Row-level security or application-level authorization.
 * Managing schema objects (tables, collections). The plugin only grants privileges on them.
-* One `DatabaseUser` targeting several instances (later phase).
+* One `InstanceUser` targeting several instances (later phase).
 * External secret stores such as Vault or ESO (later phase).
 * Zero-downtime password rotation in the MVP (see §4.10).
 
@@ -86,7 +89,7 @@ The list merges three kinds of principals:
 | Kind | Source | Badge | Actions |
 |---|---|---|---|
 | **System** | the binding's `systemUsers` list (§4.5) | `Operator-managed` | View, Reveal credentials |
-| **Managed** | `DatabaseUser` / `DatabaseRole` CRs | status (`Ready`, `Pending`, `Failed`, `Deleting`) | View, Edit, Delete, Reveal credentials, Rotate password |
+| **Managed** | `InstanceUser` / `InstanceRole` CRs | status (`Ready`, `Pending`, `Failed`, `Deleting`) | View, Edit, Delete, Reveal credentials, Rotate password |
 | **Discovered** *(Phase 2)* | read live from the database | `Unmanaged` | View, Import |
 
 - **Users and Roles** are two sub-lists in the tab. Roles are only shown when the capabilities descriptor says the engine supports them.
@@ -96,8 +99,8 @@ The list merges three kinds of principals:
   - credentials Secret name;
   - conditions and recent events.
 - **Create user:**
-  - username, then password (generate it, or bring your own Secret);
-  - roles, picked from the instance's `DatabaseRole`s plus the engine's built-in roles;
+  - username, then password (generate it, or bring your own Secret). On engines whose credential is an API key (§4.6, models), the form says "API key" and always generates it;
+  - roles, picked from the instance's `InstanceRole`s plus the engine's built-in roles;
   - privileges, either **presets** (`read`, `readWrite`, `owner` on a database) or **advanced** (engine-native actions at the scopes the engine supports);
   - optional limits.
 - **Create role:** name, privileges (same picker as above), and inherited roles where the engine supports them.
@@ -116,7 +119,7 @@ graph LR
   end
   subgraph Plugin["user-management plugin (own Helm chart)"]
     REST[REST API<br/>authz + CR facade]
-    CTRL[Controller<br/>DatabaseUser / DatabaseRole]
+    CTRL[Controller<br/>InstanceUser / InstanceRole]
     REG[Adapter registry<br/>dialects + bindings]
   end
   K[(Kubernetes API)]
@@ -158,7 +161,7 @@ graph LR
 ### 4.3 Principal classes and ownership
 
 - **System users** are defined by the binding (§4.5). The plugin does not create CRs for them.
-  - Their names, and any patterns, are added to the binding's `reservedNames`. Webhook/CEL validation rejects a `DatabaseUser` or `DatabaseRole` that uses one.
+  - Their names, and any patterns, are added to the binding's `reservedNames`. Webhook/CEL validation rejects an `InstanceUser` or `InstanceRole` that uses one.
   - "Reveal credentials" reads the Secret and key that the binding declares.
 - **Managed principals** are created from CRs. The CR is authoritative for the attributes it declares.
 - **Discovered principals** (Phase 2) are database accounts that are neither system nor managed. They are listed read-only. **Import** creates a CR with `spec.adopt: true`.
@@ -187,11 +190,11 @@ privileges:
 
 The capabilities descriptor (§4.7) lists the valid scopes and actions per engine. The admission webhook validates against it.
 
-#### `DatabaseRole`
+#### `InstanceRole`
 
 ```yaml
 apiVersion: users.plugins.openeverest.io/v1alpha1
-kind: DatabaseRole
+kind: InstanceRole
 metadata:
   name: reporting
   namespace: team-alpha
@@ -203,7 +206,7 @@ spec:
   privileges:
     - database: orders
       preset: read
-  inheritedRoles:                 # other DatabaseRoles or engine built-in roles
+  inheritedRoles:                 # other InstanceRoles or engine built-in roles
     - roleRef: { name: base-readonly }
     - builtIn: { name: pg_read_all_stats }
   deletionPolicy: Delete          # Delete | Retain
@@ -213,11 +216,11 @@ status:
   conditions: [...]
 ```
 
-#### `DatabaseUser`
+#### `InstanceUser`
 
 ```yaml
 apiVersion: users.plugins.openeverest.io/v1alpha1
-kind: DatabaseUser
+kind: InstanceUser
 metadata:
   name: app-orders
   namespace: team-alpha
@@ -230,9 +233,9 @@ spec:
     name: app-orders-password
     key: password
   roles:
-    - roleRef: { name: reporting }        # DatabaseRole in the same namespace/instance
+    - roleRef: { name: reporting }        # InstanceRole in the same namespace/instance
     - builtIn: { name: read, database: analytics }   # engine built-in role
-  privileges:                     # optional inline grants (same model as DatabaseRole)
+  privileges:                     # optional inline grants (same model as InstanceRole)
     - database: orders
       preset: readWrite
   limits:
@@ -259,6 +262,7 @@ status:
 - Fields the engine doesn't support (from the capabilities descriptor) are rejected at admission, not silently ignored.
 - **Inline privileges on engines that can't grant directly to a user** (MongoDB) are implemented as a plugin-owned implicit role, `<username>__inline`. The UI hides it, and it is reserved.
 - `DatabaseGrant` from earlier drafts is dropped. User→role assignment lives on the user, and role→role inheritance lives on the role. If RBAC-split assignment is needed later, a binding object can be added without changing these kinds.
+- **Naming.** Earlier drafts called the kinds `DatabaseUser` and `DatabaseRole`. They are `InstanceUser` and `InstanceRole` because they also cover users of models (API keys), and because `DatabaseRole` clashes with the CloudNativePG kind of the same name, which the CNPG binding writes.
 
 ### 4.5 Adapters: dialects and bindings
 
@@ -303,7 +307,7 @@ endpoint:
   host: "{instance}-rw.{namespace}.svc"    # primary, for DDL
   port: 5432
 adminCredentials:                          # used by the direct path only
-  bootstrap: cnpg-superuser-role           # plugin creates DatabaseRole "everest_useradmin" (superuser)
+  bootstrap: cnpg-superuser-role           # plugin creates CNPG DatabaseRole "everest_useradmin" (superuser)
 systemUsers:
   - name: postgres
     description: Superuser (only if superuser access is enabled)
@@ -339,6 +343,7 @@ type NativeStrategy interface {
 | New provider for an engine with a dialect, direct only | A binding (YAML). No code, no UI change. |
 | New provider whose operator has a usable user CR | A binding plus one native strategy module. |
 | New database technology | One dialect package plus a binding. No UI change. |
+| Non-database engine whose users are API keys (models) | A binding plus one native strategy that writes the provider's key Secrets. No dialect, no UI change (§4.6). |
 
 ### 4.6 Engine support
 
@@ -352,7 +357,7 @@ This section summarises a source-level review of each operator and hands-on test
 | Roles | native `DatabaseRole` (no login) | direct `CREATE ROLE` / `GRANT role` (operator has no role CRD) | direct `createRole` / `updateRole` |
 | Privileges | direct `GRANT` / `REVOKE` | native `Grant` for users; direct for roles | through roles (inline → implicit role) |
 | Databases | `owner` preset can use native `Database` | native `Database` when needed | implicit (Mongo creates DBs on write) |
-| Admin credentials (direct path) | plugin-created `DatabaseRole everest_useradmin` with `superuser: true`, because the provider doesn't expose a superuser | operator root: `MariaDB.spec.rootPasswordSecretKeyRef` | `everest-secrets-{instance}`: `MONGODB_USER_ADMIN_USER` / `_PASSWORD` |
+| Admin credentials (direct path) | plugin-created CNPG `DatabaseRole everest_useradmin` with `superuser: true`, because the provider doesn't expose a superuser | operator root: `MariaDB.spec.rootPasswordSecretKeyRef` | `everest-secrets-{instance}`: `MONGODB_USER_ADMIN_USER` / `_PASSWORD` |
 | Endpoint | `{instance}-rw` | `{instance}` service (MaxScale passes SQL-created users through) | replica-set URI (hosts from `{instance}-conn`) |
 | System users | `postgres`, `app`, `streaming_replica` | `everest` (and its operator-created `User`/`Grant`/`Database` CRs), `root`, `mariadb.sys` | `databaseAdmin`, `userAdmin`, `clusterAdmin`, `clusterMonitor`, `backup` (+ PMM user if enabled) |
 
@@ -373,6 +378,27 @@ This section summarises a source-level review of each operator and hands-on test
 - **PSMDB:** the operator's inline `spec.users` cannot drop users. Removing an entry leaves a working login. The MVP therefore uses the direct path.
   - The connection user `databaseAdmin` can create `root`-level users through its `restore` role. Tracked as a provider bug.
   - The plugin uses `userAdmin` instead.
+
+#### Models: provider-kserve (API keys)
+
+`llm` and `predictor` Instances of provider-kserve can be exposed through the Envoy AI Gateway with API keys. A user of such an Instance is a **consumer of the model**: an application, team or person with its own API key. There is no database and no dialect. The binding has a single native strategy that writes key Secrets in the format provider-kserve's gateway auth renderer already reads ([API keys proposal](https://github.com/openeverest/provider-kserve/blob/main/docs/proposals/ai-gateway-api-keys.md), §6.1), so the request path, quotas and metrics need no changes.
+
+| Plugin concept | Meaning for a model |
+|---|---|
+| `InstanceUser.spec.instanceRef` | The model Instance. |
+| `username` | Consumer name. Stored in the key Secret's `openeverest.io/ai-gateway-key-owner-name` label, so it must be a valid label value (at most 63 characters). |
+| Roles | One built-in role, `invoke`: call the model through the AI Gateway. No `InstanceRole`s, privileges or scopes. The role catalog leaves room for quota tiers later. |
+| Password | The API key, generated as `oe_sk_<random>` like the provider's own keys. The REST API and UI never accept a chosen key: a key whose value repeats another one is disabled by the provider, together with the other. A `passwordSecretRef` (kubectl only) must hold 32 to 128 printable characters. |
+| Ensure user | Write one key Secret per user in the Instance's namespace: `api_key`, a random key ID (`openeverest.io/ai-gateway-key-id`) kept across rotations, the model in `openeverest.io/ai-gateway-models`, owner kind `user`, and an owner reference to the Instance. The provider only accepts keys for models in the key's own namespace. |
+| Rotate | Change the key in the same Secret. Takes effect on the Gateway within seconds. |
+| Drop user | Delete the key Secret. The key stops working on the next render. |
+| System users | The provider's per-model key (from the Instance's connection details), listed read-only under the Instance's name. Keys other tools wrote for the model are listed as not managed. |
+| Consumer Secret | `username`, `password` (the key), `uri` (the Gateway's OpenAI base URL) and `model` (the name clients send in the `model` field), both read from the Instance's connection Secret. |
+| Not ready | The model isn't exposed through the AI Gateway, or API keys are off. Users stay `Pending` with the reason until it is. |
+
+What this gives without touching the provider: individual revocation, per-consumer token quotas through the provider's existing `(key ID, model)` buckets, and per-consumer usage through the `openeverest_key_id` metrics label. The key Secret maps the key ID back to the username.
+
+Keys that one person uses across several models don't fit here: everything in this plugin is per Instance. They are left to a separate resource (provider-kserve proposal §6.3).
 
 #### Later bindings (from the same review)
 
@@ -406,7 +432,7 @@ This section summarises a source-level review of each operator and hands-on test
   },
   "builtInRoles": ["pg_read_all_data", "pg_write_all_data", "pg_read_all_stats", "pg_monitor"],
   "username": { "pattern": "^[a-z_][a-z0-9_]{0,62}$", "reserved": ["postgres", "app", "…"] },
-  "user": { "authDatabase": false, "connectionLimit": true },
+  "user": { "authDatabase": false, "connectionLimit": true, "credential": "password" },
   "rotation": { "dualPassword": false }
 }
 ```
@@ -414,6 +440,7 @@ This section summarises a source-level review of each operator and hands-on test
 **Rules:**
 
 - The UI holds **no engine-specific logic**. The pickers, scope fields, built-in roles and validation all come from the descriptor.
+- `user.credential` is `password` for databases and `apiKey` for models. With `apiKey`, the UI labels the secret "API key", always generates it, and hides the privilege picker when `scopes` is empty.
 - The admission webhook validates CRs against the same descriptor, so kubectl and UI users get the same errors.
 
 ### 4.8 REST API
@@ -424,11 +451,11 @@ Mounted under the plugin proxy (`/v1/clusters/{cluster}/plugins/user-management/
 |---|---|---|
 | `GET` | `/capabilities?namespace&instance` | Capabilities descriptor (§4.7) |
 | `GET` | `/namespaces/{ns}/instances/{instance}/users` | List system and managed users (+ discovered, Phase 2) |
-| `POST` | `/namespaces/{ns}/instances/{instance}/users` | Create a `DatabaseUser` |
+| `POST` | `/namespaces/{ns}/instances/{instance}/users` | Create an `InstanceUser` |
 | `GET` / `PATCH` / `DELETE` | `/namespaces/{ns}/instances/{instance}/users/{name}` | Details / update / delete |
 | `POST` | `…/users/{name}/credentials` | Reveal credentials, for both system and managed users. Uses `POST` to avoid caches and URL logging. Audited |
 | `POST` | `…/users/{name}/rotate` | Rotate a managed user's password |
-| `GET` / `POST` | `/namespaces/{ns}/instances/{instance}/roles` | List / create `DatabaseRole` |
+| `GET` / `POST` | `/namespaces/{ns}/instances/{instance}/roles` | List / create `InstanceRole` |
 | `GET` / `PATCH` / `DELETE` | `…/roles/{name}` | Details / update / delete |
 | `POST` | `…/users:import` *(Phase 2)* | Adopt a discovered account |
 
@@ -436,7 +463,7 @@ Mounted under the plugin proxy (`/v1/clusters/{cluster}/plugins/user-management/
 
 There are two independent paths, the same as for `Instance`s today:
 
-- **CRDs** (kubectl, GitOps) are governed by **Kubernetes RBAC** on `databaseusers` / `databaseroles`.
+- **CRDs** (kubectl, GitOps) are governed by **Kubernetes RBAC** on `instanceusers` / `instanceroles`.
 - **REST API and UI** are governed by **OpenEverest RBAC**, checked by the plugin on every request.
 
 The host proxy only checks that the caller may *use the plugin*. It does not check which instance the request targets, and it forwards `GET` sub-paths without authentication so that bundles can load. So the plugin authorizes every request itself, the same way `plugin-inspector` does:
@@ -457,9 +484,11 @@ The plugin uses its own ServiceAccount only *after* authorization succeeds, and 
 ### 4.10 Credentials
 
 - **Generated passwords:** 32 random bytes, alphabet restricted per dialect, stored in `Secret/<user>-password`. With `passwordSecretRef`, the user's own Secret is used and **never deleted** by the plugin.
-- **Consumer Secret** `Secret/<user>-credentials`, owned by the `DatabaseUser`. It uses the same keys as `{instance}-conn`, following servicebinding.io conventions:
+- **Consumer Secret** `Secret/<user>-credentials`, owned by the `InstanceUser`. It uses the same keys as `{instance}-conn`, following servicebinding.io conventions:
   - `type`, `provider`, `host`, `port`, `username`, `password`, `database`, `uri`;
   - plus `ca.crt` / `readOnlyHost` when the instance provides them.
+  - For models: `username`, `password` (the API key), `uri` (the Gateway's OpenAI base URL) and `model`.
+- **API keys (models):** generated as `oe_sk_<random>`. The key is copied into the provider's key Secret (§4.6), which the plugin owns and recreates if it is deleted by hand.
 - **Operator watch labels:** the plugin sets `cnpg.io/reload=true` or `k8s.mariadb.com/watch` on Secrets that native strategies consume.
 - **Rotation (MVP):** manual and immediate. The old password stops working once the new one is applied.
 - **Zero-downtime rotation (later):**
@@ -501,14 +530,14 @@ Once providers outside this repo want user management, move the binding data int
 
 | Phase | Scope |
 |---|---|
-| **MVP** | Plugin skeleton (from `generic-plugin-template`), CRDs + admission webhook, controller, REST API with per-request authz, Users tab (list, details, create user/role, reveal, delete, manual rotate). Dialects: postgresql, mysql, mongodb. Bindings: CloudNativePG, MariaDB, PSMDB. |
+| **MVP** | Plugin skeleton (from `generic-plugin-template`), CRDs + admission webhook, controller, REST API with per-request authz, Users tab (list, details, create user/role, reveal, delete, manual rotate). Dialects: postgresql, mysql, mongodb. Bindings: CloudNativePG, MariaDB, PSMDB, provider-kserve (model API keys). |
 | **Phase 2** | Bindings: Percona PostgreSQL, Percona XtraDB Cluster, Percona Server for MySQL, TiDB. Discovered users and import (`adopt`). Drift reporting. Scheduled rotation. Dual-password rotation for MySQL 8. Admission-policy spike for inline CR writes (§4.12). `everestctl users`. |
 | **Phase 3** | Valkey (native SSA), MSSQL (per-replica logins), ClickHouse (replicated user directory), Cassandra. Move bindings to `Provider.spec.userManagement` (§4.13). |
 | **Phase 4** | LDAP / OIDC-backed users. External secret stores (Vault, ESO). Multi-instance users. A/B rotation for engines without dual passwords. |
 
 ## 6. Definition of Done (MVP)
 
-* `DatabaseUser` and `DatabaseRole` CRDs, admission validation driven by the capabilities descriptor.
+* `InstanceUser` and `InstanceRole` CRDs, admission validation driven by the capabilities descriptor.
 * CloudNativePG, MariaDB and PSMDB bindings pass an e2e suite. For each engine it covers:
   * create a user and a role, assign the role;
   * presets and advanced privileges;
@@ -518,7 +547,8 @@ Once providers outside this repo want user management, move the binding data int
   * system users listed and immutable;
   * reserved names rejected;
   * replay after a restore.
-* The Users tab works for all three engines without any engine-specific UI code.
+* The provider-kserve binding passes an e2e suite against a model exposed through the AI Gateway with API keys on: a created key calls the model, a rotated key stops the old value, a deleted key is rejected, other keys keep working, and token quotas and metrics are attributed per key.
+* The Users tab works for all engines, databases and models, without any engine-specific UI code.
 * The REST API and CRDs reach parity: every UI action is reproducible with `kubectl apply`.
 * Authorization: every endpoint is denied for users without access to the instance (tested), and credential reveals are audit-logged.
 * User guide covering app onboarding, roles, rotation, revocation, and debugging a stuck user.
@@ -531,13 +561,14 @@ Once providers outside this repo want user management, move the binding data int
 * **Direct connection only.** Rejected as the only strategy. Valkey's operator wipes ACLs created directly, and native CRs give operator-level status and survive plugin uninstall where they exist. Direct remains the baseline.
 * **Host-managed CRDs and the `/reconcile` callback (spec 003 §10.8).** Not used. A plugin-owned controller is simpler, already supported by spec 003 §10.7, and doesn't depend on unimplemented host features.
 * **Separate `DatabaseGrant` kind.** Dropped for now (see §4.4).
+* **Per-consumer API keys in provider-kserve itself, or in a separate plugin.** Rejected. A key per consumer needs the same UI, REST API, credentials Secret and RBAC checks as a database user. The provider only defines the key Secret contract; this plugin writes the Secrets.
 * **crossplane `provider-sql`.** Not reused. It needs Crossplane core types, covers only PostgreSQL/MySQL/MSSQL, and has known grant-reconciliation gaps (revoke-all-then-grant, reduced privileges not revoked).
 
 ## 8. Open Questions
 
 1. **Deletion default.** Should `deletionPolicy` default to `Delete` (proposed) or `Retain`? And on PostgreSQL, who receives reassigned objects: the database owner (proposed), or a configurable principal?
 2. **Revealing system-user credentials** includes superusers (`postgres`, `root`, `userAdmin`). Is "can read the instance connection" sufficient, or do we want a dedicated permission?
-3. **CloudNativePG admin role.** Is a plugin-created `superuser` `DatabaseRole` acceptable, or should the CNPG provider expose `enableSuperuserAccess`?
+3. **CloudNativePG admin role.** Is a plugin-created `superuser` CNPG `DatabaseRole` acceptable, or should the CNPG provider expose `enableSuperuserAccess`?
 4. **Databases.** Should the MVP expose a `Database` kind, or only create databases implicitly through the `owner` preset?
 5. **Instance deletion.** Keep CRs as `Orphaned` (proposed), or garbage-collect them with the Instance?
 6. **Plugin name and API group.** `user-management` / `users.plugins.openeverest.io`. Should this be confirmed against the spec 003 naming rules?
@@ -552,3 +583,4 @@ Once providers outside this repo want user management, move the binding data int
 * MongoDB Controllers for Kubernetes: `MongoDBUser` (prior art for a separate user CR).
 * opensearch-k8s-operator: `OpensearchUserRoleBinding` (prior art for non-destructive bindings).
 * [Service Binding specification](https://servicebinding.io/): Secret key conventions.
+* provider-kserve: [API keys for the AI Gateway](https://github.com/openeverest/provider-kserve/blob/main/docs/proposals/ai-gateway-api-keys.md) (§6.1 key Secret contract, §6.2 named keys through this plugin).
