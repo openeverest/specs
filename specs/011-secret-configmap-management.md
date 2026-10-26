@@ -3,7 +3,7 @@
 *   **Status:** Draft
 *   **Authors:** @chilagrow
 *   **Created:** 2026-06-30
-*   **Last Updated:** 2026-10-09
+*   **Last Updated:** 2026-10-26
 *   **Related Issues:** https://github.com/openeverest/openeverest/issues/1798, https://github.com/openeverest/openeverest/issues/2471
 
 
@@ -198,8 +198,6 @@ If the secret was found, but does not contain the label `"openeverest.io/managed
 #### `DELETE /clusters/{cluster}/namespaces/{ns}/secrets/{name}`
 
 On success, returns NO CONTENT 204 with no body.
-
-If the secret has finalizer, it returns ACCEPTED 202.
 
 If the secret was found, but does not contain the label `"openeverest.io/managed": "true"`, it returns 404.
 
