@@ -3,7 +3,7 @@
 *   **Status:** Draft
 *   **Authors:** @chilagrow
 *   **Created:** 2026-06-04
-*   **Last Updated:** 2026-06-04
+*   **Last Updated:** 2026-10-30
 *   **Related Issues:** [openeverest/openeverest#1820]
 
 ---
@@ -30,12 +30,50 @@ Currently, deploying an Instance requires users to manually configure each compo
 
 ## 4. Proposed Solution / Design
 
-### InstancePreset CR
+### Preset CRs
 
-InstancePreset is a cluster-scoped configuration template mirroring Instance spec. It is not a namespace-scoped resource to avoid users from defining InstancePresets for each namespace.
-InstancePreset does not contain namespace-scoped resources and namespace-scoped fields are left empty.
-InstancePreset API provides ways to pre-fill empty namespace-scoped fields (MonitoringConfig, Secrets) when fetched with namespace parameter.
-Instances are created by copying values from InstancePreset and contain annotation references to the originating InstancePreset.
+`ClusterInstancePreset` CR is a cluster-scoped configuration template mirroring Instance spec.
+It is installed with each provider or created by admin user to have template that can be used in any namespace.
+It can only be created and managed by admins using `kubectl` or equivalent.
+It must not contain namespace specific references. If you need namespace specific reference, you need to create `InstancePreset`.
+
+`InstancePreset` CR is a namespace-scoped configuration template, the spec also mirrors Instance, it may contain namespace specific references and allows users to create, update and delete them via OpenEverest API.
+
+Instances are created by copying values from `ClusterInstancePreset` or `InstancePreset` and contain annotation references to the originating Preset.
+
+**Example ClusterInstancePreset CR:**
+
+```yaml
+apiVersion: core.openeverest.io/v1alpha1
+kind: ClusterInstancePreset
+metadata:
+  name: psmdb-replicaset
+spec:
+  providerRef:
+    name: percona-server-mongodb
+  version: "8.0.32"
+  topology:
+    type: replicaSet
+  components:
+    engine:
+      storage:
+        size: 25Gi
+      resources:
+        limits:
+          cpu: "1"
+          memory: 4Gi
+      replicas: 3
+      schedulingPolicy:
+        affinity:
+          podAntiAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 1
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+      service:
+        serviceType: ClusterIP
+  deletionPolicy: Cascade
+```
 
 **Example InstancePreset CR:**
 
@@ -43,92 +81,39 @@ Instances are created by copying values from InstancePreset and contain annotati
 apiVersion: core.openeverest.io/v1alpha1
 kind: InstancePreset
 metadata:
-  name: mongodb-production
+  name: psmdb-default
+  namespace: my-special-place
 spec:
-  provider: percona-server-mongodb
-  
+  providerRef:
+    name: percona-server-mongodb
+  version: "8.0.32"
+  topology:
+    type: replicaSet
+  parameters:
+    tls:
+      issuer:
+        kind: Issuer
+      mode: preferTLS
   components:
     engine:
-      type: mongod
-      replicas: 3
+      storage:
+        size: 25Gi
+        storageClass: local-path
       resources:
         limits:
           cpu: "1"
           memory: 4Gi
-      storage:
-        size: 25Gi
-        storageClass: "local-path"
-      affinity:
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 1
-              podAffinityTerm:
-                topologyKey: kubernetes.io/hostname
-      service: # Example to showcase usage for component spec not yet available
-        serviceType: LoadBalancer
-        annotations:
-          service.beta.kubernetes.io/aws-load-balancer-internal: "true"
-        loadBalancerService:
-          sourceRanges:
-            - "192.168.1.100"
-
-    monitoring:
-      type: pmm
-      customSpec:
-        monitoringConfigName: "" # Namespace-scoped MonitoringConfig is empty - resolve from namespace default with annotation "openeverest.io/is-default-components-monitoring"
-    
-    splithorizon: # Example to showcase usage for component not yet available
-      type: splithorizon
-      config:
-        secretRef:
-          name: ""  # Namespace-scoped secret is empty - resolve from namespace default with annotation "openeverest.io/is-default-components-splithorizon"
-      customSpec:
-        domain: example.com
-    
-  topology:
-    type: replicaSet
-  
-  version: "8.0.12"
-```
-
-#### Default Resource Pre-filling
-
-When fetching a InstancePreset via API with a namespace parameter, namespace-scoped fields are pre-filled using annotation-based defaults from that namespace. If more than one default is set, the most recently created is selected.
-This is the same approach used for Kubernetes `PVC` to discover `StorageClass` by looking for annotation `storageclass.kubernetes.io/is-default-class: "true"`.
-
-Preset pre-filling determines which resource to look for by the field name:
-- Field `monitoringConfig`, `monitoringConfigRef`, `monitoringConfigName` → Look for `monitoring.openeverest.io/v1alpha1` `MonitoringConfig` CRD
-- Field `secret`, `secretRef`, `secretName` → Look for `Secret` resource
-
-Instance may contain references to secrets such as Split Horizon Certificates.
-The secret annotation requires additional information to determine which field they are used by.
-The annotation uses `openeverest.io/is-default-components-{component-name}` format. The default annotation for secret used by `spec.components.splithorizon` is `openeverest.io/is-default-components-splithorizon: "true"`.
-
-- `MonitoringConfig` → `openeverest.io/is-default-components-monitoring: "true"`
-- `Secret` (for splithorizon) → `openeverest.io/is-default-components-splithorizon: "true"`
-
-**Example: Annotating default**
-
-```bash
-kubectl annotate Secret <secret-name> \
-  openeverest.io/is-default-components-splithorizon="true" \
-  --overwrite
-```
-
-Or using a CR:
-
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: splithorizon-tls
-  namespace: prod
-  annotations:
-    openeverest.io/is-default-components-splithorizon: "true"
-type: Opaque
-data:
-  ca.key: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQpN...
-  ca.crt: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURGRENDQWZ5Z0F3SUJBZ0lVWTlLTWtlTC82RVhQaitWTjQ...
+      replicas: 3
+      service:
+        serviceType: ClusterIP
+  backup:
+    enabled: true
+    classRef:
+      name: percona-backup-mongodb
+    storages:
+      - storageRef:
+          name: bs-msp-1 # namespace-scoped resource reference
+  deletionPolicy: Cascade
 ```
 
 ### Fetching Presets via API
@@ -136,94 +121,81 @@ data:
 #### API Endpoints
 
 ```
-GET /clusters/{cluster}/instance-presets                                 # List all presets
-GET /clusters/{cluster}/instance-presets?provider={provider}             # Filter by provider
-GET /clusters/{cluster}/instance-presets/{name}                          # Get specific preset
-GET /clusters/{cluster}/instance-presets/{name}/resolve?namespace={ns}   # Get preset with namespace defaults pre-filled
+GET /clusters/{cluster}/cluster-instance-presets                                 # List all presets
+GET /clusters/{cluster}/cluster-instance-presets?provider={provider}             # Filter by provider
+GET /clusters/{cluster}/cluster-instance-presets/{name}                          # Get specific preset
 ```
 
-#### 1. List All Presets
+```
+GET /clusters/{cluster}/namespaces/{ns}/instance-presets                         # List all presets
+GET /clusters/{cluster}/namespaces/{ns}/instance-presets?provider={provider}     # Filter by provider
+POST /clusters/{cluster}/namespaces/{ns}/instance-presets                        # Create a preset
+GET /clusters/{cluster}/namespaces/{ns}/instance-presets/{name}                  # Get specific preset
+PUT /clusters/{cluster}/namespaces/{ns}/instance-presets/{name}                  # Update specific preset
+DELETE /clusters/{cluster}/namespaces/{ns}/instance-presets/{name}               # Delete specific preset
+```
 
-Returns all installed presets with:
-- Namespace-scoped fields empty (e.g., `monitoringConfigName` → "")
+#### 1. List All ClusterInstancePresets
 
 ```
-GET /clusters/{cluster}/instance-presets
+GET /clusters/{cluster}/cluster-instance-presets
 ```
 
-**Response:** Array of preset objects.
+**Response:** List object with `items` containing ClusterInstancePresets.
 
 ```json
-[{
-  "apiVersion": "core.openeverest.io/v1alpha1",
-  "kind": "InstancePreset",
-  "metadata": {
-    "name": "mongodb-production"
-  },
-  "spec": {
-    "provider": "percona-server-mongodb",
-    "components": {
-      "engine": {
-        "type": "mongod",
-        "replicas": 3,
-        "resources": {
-          "limits": {
-            "cpu": "1",
-            "memory": "4Gi"
-          }
-        },
-        "storage": {
-          "size": "25Gi",
-          "storageClass": "local-path"
-        },
-        "affinity": {
-          "podAntiAffinity": {
-            "preferredDuringSchedulingIgnoredDuringExecution": [
-              {
-                "weight": 1,
-                "podAffinityTerm": {
-                  "topologyKey": "kubernetes.io/hostname"
-                }
-              }
-            ]
-          }
-        },
-        "service": { // Example to showcase usage for component spec not yet available
-          "serviceType": "LoadBalancer",
-          "annotations": {
-            "service.beta.kubernetes.io/aws-load-balancer-internal": "true"
-          },
-          "loadBalancerService": {
-            "sourceRanges": [
-              "192.168.1.100"
-            ]
-          }
+{
+    "items": [
+        {
+            "kind": "ClusterInstancePreset",
+            "apiVersion": "core.openeverest.io/v1alpha1",
+            "metadata": {
+                "name": "psmdb-replicaset"
+            },
+            "spec": {
+                "providerRef": {
+                    "name": "percona-server-mongodb"
+                },
+                "version": "8.0.32",
+                "topology": {
+                    "type": "replicaSet"
+                },
+                "components": {
+                    "engine": {
+                        "storage": {
+                            "size": "25Gi"
+                        },
+                        "resources": {
+                            "limits": {
+                                "cpu": "1",
+                                "memory": "4Gi"
+                            }
+                        },
+                        "replicas": 3,
+                        "schedulingPolicy": {
+                            "affinity": {
+                                "podAntiAffinity": {
+                                    "preferredDuringSchedulingIgnoredDuringExecution": [
+                                        {
+                                            "weight": 1,
+                                            "podAffinityTerm": {
+                                                "topologyKey": "kubernetes.io/hostname"
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        },
+                        "service": {
+                            "serviceType": "ClusterIP"
+                        }
+                    }
+                },
+                "deletionPolicy": "Cascade"
+            }
         }
-      },
-      "monitoring": {
-        "type": "pmm",
-        "customSpec": {
-          "monitoringConfigName": "" // empty when namespace is unknown
-        }
-      },
-      "splithorizon": { // Example to showcase usage for component not yet available
-        "type": "splithorizon",
-        "config": {
-          "secretRef": {
-            "name": ""  // empty when namespace is unknown
-          }
-        },
-        "customSpec": {
-          "domain": "example.com"
-        }
-      }
-    },
-    "topology": {
-      "type": "replicaSet"
-    },
-    "version": "8.0.12"
-  }
-}]
+    ]
+}
 ```
 
 #### 2. Filter by Provider
@@ -231,185 +203,180 @@ GET /clusters/{cluster}/instance-presets
 Returns presets for a specific provider.
 
 ```
-GET /clusters/{cluster}/instance-presets?provider=percona-server-mongodb
+GET /clusters/{cluster}/cluster-instance-presets?provider=percona-server-mongodb
 ```
 
 **Response:** Same as above, filtered by provider.
 
 #### 3. Get Specific Preset
 
-Returns a specific preset with:
-- Namespace-scoped fields empty (e.g., `monitoringConfigName` → "")
-
 ```
-GET /clusters/{cluster}/instance-presets/{name}
+GET /clusters/{cluster}/cluster-instance-presets/{name}
 ```
 
-**Response:** Preset object with empty namespace-scoped fields.
+**Response:** Same as an item of list
+
+#### 4. List all InstancePreset
+
+```
+GET /clusters/{cluster}/namespaces/{namespace}/instance-presets
+```
+
+**Response:** List object with `items` containing InstancePresets. `bs-msp-1` is a namespace-scoped resource reference.
 
 ```json
 {
-  "apiVersion": "core.openeverest.io/v1alpha1",
-  "kind": "InstancePreset",
-  "metadata": {
-    "name": "mongodb-production"
-  },
-  "spec": {
-    "provider": "percona-server-mongodb",
-    "components": {
-      "engine": {
-        "type": "mongod",
-        "replicas": 3,
-        "resources": {
-          "limits": {
-            "cpu": "1",
-            "memory": "4Gi"
-          }
-        },
-        "storage": {
-          "size": "25Gi",
-          "storageClass": "local-path"
-        },
-        "affinity": {
-          "podAntiAffinity": {
-            "preferredDuringSchedulingIgnoredDuringExecution": [
-              {
-                "weight": 1,
-                "podAffinityTerm": {
-                  "topologyKey": "kubernetes.io/hostname"
-                }
-              }
-            ]
-          }
-        },
-        "service": { // Example to showcase usage for component spec not yet available
-          "serviceType": "LoadBalancer",
-          "annotations": {
-            "service.beta.kubernetes.io/aws-load-balancer-internal": "true"
-          },
-          "loadBalancerService": {
-            "sourceRanges": [
-              "192.168.1.100"
-            ]
-          }
+    "items": [
+        {
+            "kind": "InstancePreset",
+            "apiVersion": "core.openeverest.io/v1alpha1",
+            "metadata": {
+                "name": "psmdb-default",
+                "namespace": "my-special-place"
+            },
+            "spec": {
+                "providerRef": {
+                    "name": "percona-server-mongodb"
+                },
+                "version": "8.0.32",
+                "topology": {
+                    "type": "replicaSet"
+                },
+                "parameters": {
+                    "tls": {
+                        "issuer": {
+                            "kind": "Issuer"
+                        },
+                        "mode": "preferTLS"
+                    }
+                },
+                "components": {
+                    "engine": {
+                        "storage": {
+                            "size": "25Gi",
+                            "storageClass": "local-path"
+                        },
+                        "resources": {
+                            "limits": {
+                                "cpu": "1",
+                                "memory": "4Gi"
+                            }
+                        },
+                        "replicas": 3,
+                        "service": {
+                            "serviceType": "ClusterIP"
+                        }
+                    }
+                },
+                "backup": {
+                    "enabled": true,
+                    "classRef": {
+                        "name": "percona-backup-mongodb"
+                    },
+                    "storages": [
+                        {
+                            "storageRef": {
+                                "name": "bs-msp-1"
+                            }
+                        }
+                    ]
+                },
+                "deletionPolicy": "Cascade"
+            }
         }
-      },
-      "monitoring": {
-        "type": "pmm",
-        "customSpec": {
-          "monitoringConfigName": "" // empty when namespace is unknown
-        }
-      },
-      "splithorizon": { // Example to showcase usage for component not yet available
-        "type": "splithorizon",
-        "config": {
-          "secretRef": {
-            "name": ""  // empty when namespace is unknown
-          }
-        },
-        "customSpec": {
-          "domain": "example.com"
-        }
-      }
-    },
-    "topology": {
-      "type": "replicaSet"
-    },
-    "version": "8.0.12"
-  }
+    ]
 }
 ```
 
-#### 4. Get InstancePreset with Namespace Defaults
-
-Presets API has mechanism to pre-fill namespace defaults.
-When `namespace` query parameter is provided, the API returns the InstancePreset CR with namespace defaults pre-filled.
-
-Returns a specific preset with:
-- Namespace-scoped fields resolved (e.g., `monitoringConfigName` → "config")
+#### 5. Create InstancePreset
 
 ```
-GET /clusters/{cluster}/instance-presets/{name}/resolve?namespace={ns}
+POST /clusters/{cluster}/namespaces/{namespace}/instance-presets
 ```
 
-**Response:** InstancePreset object with pre-filled namespace-scoped fields.
+**Request:**
 
 ```json
 {
-  "apiVersion": "core.openeverest.io/v1alpha1",
-  "kind": "InstancePreset",
-  "metadata": {
-    "name": "mongodb-production"
-  },
-  "spec": {
-    "provider": "percona-server-mongodb",
-    "components": {
-      "engine": {
-        "type": "mongod",
-        "replicas": 3,
-        "resources": {
-          "limits": {
-            "cpu": "1",
-            "memory": "4Gi"
-          }
+    "apiVersion": "core.openeverest.io/v1alpha1",
+    "kind": "InstancePreset",
+    "metadata": {
+        "name": "psmdb-default"
+    },
+    "spec": {
+        "providerRef": {
+            "name": "percona-server-mongodb"
         },
-        "storage": {
-          "size": "25Gi",
-          "storageClass": "local-path"
+        "topology": {
+            "type": "replicaSet"
         },
-        "affinity": {
-          "podAntiAffinity": {
-            "preferredDuringSchedulingIgnoredDuringExecution": [
-              {
-                "weight": 1,
-                "podAffinityTerm": {
-                  "topologyKey": "kubernetes.io/hostname"
+        "backup": {
+            "classRef": {
+                "name": "percona-backup-mongodb"
+            },
+            "enabled": true,
+            "storages": [
+                {
+                    "name": "bs-msp-1",
+                    "storageRef": {
+                        "name": "bs-msp-1"
+                    }
                 }
-              }
             ]
-          }
         },
-        "service": { // Example to showcase usage for component spec not yet available
-          "serviceType": "LoadBalancer",
-          "annotations": {
-            "service.beta.kubernetes.io/aws-load-balancer-internal": "true"
-          },
-          "loadBalancerService": {
-            "sourceRanges": [
-              "192.168.1.100"
-            ]
-          }
-        }
-      },
-      "monitoring": {
-        "type": "pmm",
-        "customSpec": {
-          "monitoringConfigName": "config" // pre-filled from MontoringConfig CR with default annotation "openeverest.io/is-default-components-monitoring"
-        }
-      },
-      "splithorizon": { // Example to showcase usage for component not yet available
-        "type": "splithorizon",
-        "config": {
-          "secretRef": {
-            "name": "splithorizon-tls" // pre-filled from Secret with default annotation "openeverest.io/is-default-components-splithorizon"
-          }
+        "components": {
+            "engine": {
+                "service": {
+                    "serviceType": "ClusterIP"
+                },
+                "replicas": 3,
+                "resources": {
+                    "limits": {
+                        "cpu": "1",
+                        "memory": "4Gi"
+                    }
+                },
+                "storage": {
+                    "size": "25Gi",
+                    "storageClass": "local-path"
+                }
+            }
         },
-        "customSpec": {
-          "domain": "example.com"
-        }
-      }
-    },
-    "topology": {
-      "type": "replicaSet"
-    },
-    "version": "8.0.12"
-  }
+        "version": "8.0.32"
+    }
 }
 ```
+
+**Response:** Created InstancePreset
+
+#### 6. Get InstancePreset
+
+```
+GET /clusters/{cluster}/namespaces/{namespace}/instance-presets/{name}
+```
+
+**Response:** An item of the list response
+
+#### 7. Update InstancePreset
+
+```
+PUT /clusters/{cluster}/namespaces/{namespace}/instance-presets/{name}
+```
+
+**Request:** Same as the create request body.
+
+#### 8. Delete InstancePreset
+
+```
+DELETE /clusters/{cluster}/namespaces/{namespace}/instance-presets/{name}
+```
+
+**Response:** No content
 
 ### Instance CR
 
-Instance CR spec is explicitly defined from InstancePreset CR. The `openeverest.io/preset: {name}` annotation is used for RBAC check for users who can create Instance from InstancePreset defaults but cannot change from the defaults.
+Instance CR spec is explicitly defined from InstancePreset CR or ClusterInstancePreset CR.
+The `openeverest.io/instance-preset: {name}` and `openeverest.io/cluster-instance-preset: {name}` annotations are used for RBAC check for users who can create Instance from preset defaults but cannot change from the defaults.
 
 **Example Instance CR:**
 
@@ -418,55 +385,42 @@ apiVersion: core.openeverest.io/v1alpha1
 kind: Instance
 metadata:
   name: my-mongodb
-  namespace: prod
+  namespace: my-special-place
   annotations:
     # Preset tracking
-    openeverest.io/instance-preset: "mongodb-production"
-
+    openeverest.io/instance-preset: "psmdb-default"
+# Full configuration copied from the preset (self-contained, no references to Preset)
 spec:
-  # Full resolved configuration (self-contained, no references to Preset)
-  provider: percona-server-mongodb
-  
+  providerRef:
+    name: percona-server-mongodb
+  version: "8.0.32"
+  topology:
+    type: replicaSet
+  parameters:
+    tls:
+      issuer:
+        kind: Issuer
+      mode: preferTLS
   components:
     engine:
-      replicas: 5  # USER OVERRIDE - different from preset's 3
-      resources:  # FROM PRESET
+      storage:
+        size: 25Gi
+        storageClass: local-path
+      resources:
         limits:
           cpu: "1"
           memory: 4Gi
-      storage:  # FROM PRESET
-        size: 25Gi
-        storageClass: local-path
-      affinity:  # FROM PRESET
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 1
-              podAffinityTerm:
-                topologyKey: kubernetes.io/hostname
-      service: # Example to showcase usage for component spec not yet available
-        serviceType: LoadBalancer
-        annotations:
-          service.beta.kubernetes.io/aws-load-balancer-internal: "true"
-        loadBalancerService:
-          sourceRanges:
-            - "192.168.1.100"b
-
-    monitoring:
-      customSpec:
-        monitoringConfigName: config  # RESOLVED from namespace default
-    
-    splithorizon: # Example to showcase usage for component not yet available
-      type: splithorizon
-      config:
-        secretRef:
-          name: splithorizon-tls  # RESOLVED from namespace default
-      customSpec:
-        domain: example.com
-    
-  topology:
-    type: replicaSet
-  
-  version: "8.0.12"
+      replicas: 3
+      service:
+        serviceType: ClusterIP
+  backup:
+    enabled: true
+    classRef:
+      name: percona-backup-mongodb
+    storages:
+      - storageRef:
+          name: bs-msp-1
+  deletionPolicy: Cascade
 ```
 
 ### OpenEverest UI
@@ -475,19 +429,20 @@ The OpenEverest UI fetches available Presets from a provider.
 
 **Phase 1 UI Flow for creating Instance:**
 
-1. **Select field with list of presets**: UI fetches available presets for selected provider
+1. **User Selects Namespace**:
+
+2. **Select field with list of presets**: UI fetches both `ClusterInstancePresets` and `InstancePresets` for selected provider
    ```
-   GET /clusters/{cluster}/instance-presets?provider=percona-server-mongodb
+   GET /clusters/{cluster}/cluster-instance-presets?provider=percona-server-mongodb
    ```
 
-2. **User Selects Namespace**:
-
-3. **User Selects Preset**: UI fetches preset with defaults pre-filled
    ```
-   GET /clusters/${cluster}/instance-presets/mongodb-production/resolve?namespace=prod
+   GET /clusters/{cluster}/namespaces/{namespace}/instance-presets?provider=percona-server-mongodb
    ```
 
-4. **Pre-fill Form**: UI populates Instance creation form with Preset values
+3. **User Selects Preset**:
+
+4. **Pre-fill Form**: UI populates Instance creation form with the selected Preset values
 
 5. **User Overrides** (Phase 1: read-only preview, Phase 2: editable): User can review values
 
@@ -499,7 +454,7 @@ Some users can deploy Instance with one click, but they are unable to edit Insta
 The new Casbin RBAC permission `deploy` Instance is added for users who can create instances from presets only.
 This is a lower level permission than `create` Instance permission which allows users to define custom instance specs.
 
-Users with `deploy` permissions require the `openeverest.io/instance-preset` annotation before submitting the Instance CR.
+Users with `deploy` permissions require the `openeverest.io/cluster-instance-preset` annotation for selected `ClusterInstancePreset` or `openeverest.io/instance-preset` annotation for `InstancePreset` before submitting the Instance CR.
 Any deviation from Preset defaults is checked by the server.
 
 **Permission Levels for Instance:**
@@ -509,10 +464,10 @@ Any deviation from Preset defaults is checked by the server.
 - **update** - Can modify existing instances
 - **delete** - Can delete instances
 
-Following checks are made upon creating an Instance is InstancePreset is defined in the annotation.
+The following checks are made upon creating an Instance if the `openeverest.io/instance-preset` or `openeverest.io/cluster-instance-preset` annotation is defined.
 
-1. User with read InstancePreset permission? No -> reject
-2. User with create Instance permission? Yes -> creation Instance
+1. User with create Instance permission? Yes -> create Instance
+2. User with read permission on the referenced InstancePreset or ClusterInstancePreset? No -> reject
 3. User with deploy Instance permission? No -> reject
 4. Check Instance spec, is it modified from Preset? Yes -> reject, No -> create Instance
 
@@ -523,8 +478,8 @@ Alice has access to Preset A and Bob has access to Preset B.
 1. Give Alice `read` permission to Preset A, give Bob `read` permission to Preset B.
 
 ```
-p, role:teama, instance-presets, read, {cluster}/preset-a
-p, role:teamb, instance-presets, read, {cluster}/preset-b
+p, role:teama, cluster-instance-presets, read, {cluster}/preset-a
+p, role:teamb, cluster-instance-presets, read, {cluster}/preset-b
 g, alice, role:teama
 g, bob, role:teamb
 ```
@@ -544,7 +499,7 @@ Chris can modify Instance from Preset defaults.
 1. Give Chris `read` permission to Preset C.
 
 ```
-p, chris, instance-presets, read, {cluster}/preset-c
+p, chris, instance-presets, read, {cluster}/{namespace}/preset-c
 ```
 
 2. Give Chris `create` permission to Instances.
@@ -560,7 +515,7 @@ p, chris, instances, create, {cluster}/{namespace}/*
 **Goal:** One-click deployment with pre-configured presets
 
 **Validation**
-- The pre-installed InstancePreset CR ships with known-valid values.
+- The pre-installed ClusterInstancePreset CR ships with known-valid values.
 
 **User Stories:**
 - As a user, I can deploy an Instance with one click, and the system applies a preset automatically
@@ -585,7 +540,6 @@ It also gives users the ability to manage presets on OpenEverest UI. While UI sp
 
 **Validation**
 - A InstancePreset CR follows the same validation rules as an Instance CR.
-- Namespace-scoped and cluster-scoped fields are left empty and disabled from modifying.
 
 **User Stories:**
 - As a user, I can edit preset values before creating an Instance
@@ -595,7 +549,7 @@ It also gives users the ability to manage presets on OpenEverest UI. While UI sp
 
 ## 5. Definition of Done
 
-**Phase 1:** InstancePreset CRD + pre-installed CRs + API with default resolution + UI selector
+**Phase 1:** InstancePreset CRD + pre-installed CRs + API + UI selector
 
 **Phase 2:** Editable Instance UI (or Generic Plugin) + InstancePreset CRUD API + RBAC + "Create Preset from instance"
 
@@ -605,8 +559,9 @@ It also gives users the ability to manage presets on OpenEverest UI. While UI sp
 - ConfigMap-based: No validation, versioning
 - Preset reference in Instance.spec: Not self-contained requiring merging Preset and Instance.Spec in webhook or in-memory in controller
 - Client-side pre-filling: Complex UI logic, inconsistent
+- Cluster-scoped CR with namespace-specific values filled from annotation defaults.
 
-**Chosen:** Cluster-scoped CR mirroring Instance spec, backend API pre-fills defaults, annotation tracking, instances detached after creation.
+**Chosen:** Cluster-scoped and namespace-scoped CRs mirroring Instance spec (namespace-specific values live in InstancePreset instead of being pre-filled by the backend), annotation tracking, instances detached after creation.
 
 ## 7. Open Questions
 
