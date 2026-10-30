@@ -429,9 +429,9 @@ The OpenEverest UI fetches available Presets from a provider.
 
 **Phase 1 UI Flow for creating Instance:**
 
-1. **User Selects Namespace**:
+1. **User Selects Preset**: (Phase 2: the selection of namespace happens before the selection of preset)
 
-2. **Select field with list of presets**: UI fetches both `ClusterInstancePresets` and `InstancePresets` for selected provider
+2. **Select field with list of presets**: UI fetches both `ClusterInstancePresets` and `InstancePresets` for selected provider. (Phase 1: support cluster-scope `ClusterInstancePresets` only, Phase 2: also support namespace-scope `InstancePresets`)
    ```
    GET /clusters/{cluster}/cluster-instance-presets?provider=percona-server-mongodb
    ```
@@ -440,7 +440,7 @@ The OpenEverest UI fetches available Presets from a provider.
    GET /clusters/{cluster}/namespaces/{namespace}/instance-presets?provider=percona-server-mongodb
    ```
 
-3. **User Selects Preset**:
+3. **User Selects Namespace**:
 
 4. **Pre-fill Form**: UI populates Instance creation form with the selected Preset values
 
@@ -534,12 +534,13 @@ p, chris, instances, create, {cluster}/{namespace}/*
 **Goal:** Users can edit Instance values during Instance creation from preset and admins can manage custom presets
 
 **Overview:**
-Users are able to edit Instances populated from presets.
-Users can create a preset from an Instance.
+Users can create `Instance` from namespace-scoped `InstancePreset`.
+Users are able to edit Instances populated from `ClusterInstancePreset` and `InstancePreset`.
+Users can create a `InstancePreset` from an Instance.
 It also gives users the ability to manage presets on OpenEverest UI. While UI specific for presets can be integrated into OpenEverest, an alternative is implementing preset management via Generic Plugin.
 
 **Validation**
-- A InstancePreset CR follows the same validation rules as an Instance CR.
+- A `InstancePreset` CR follows the same validation rules as an Instance CR.
 
 **User Stories:**
 - As a user, I can edit preset values before creating an Instance
