@@ -3,18 +3,20 @@
 *   **Status:** Draft
 *   **Authors:** @recharte
 *   **Created:** 2026-05-18
-*   **Last Updated:** 2026-07-25
+*   **Last Updated:** 2026-10-30
 *   **Related Issues:** openeverest/roadmap#1
 
 ---
 
 ## 1. Summary
 
-The OpenEverest Extension Hub is a centralized discovery and distribution catalog for all installable extensions — Providers (spec 001) and generic plugins (spec 003). It uses a **formula/pointer model**: a central git repository (`openeverest/hub`) holds small YAML metadata files that reference OCI artifacts hosted in their authors' own registries. A CI-generated JSON index powers a browseable website, the `everestctl` CLI, and an in-product UI for one-click discovery and installation. Artifacts are pinned by OCI digest on named channels (`stable`/`edge`), giving authors independent release cadence while providing users with strong supply-chain integrity guarantees.
+The OpenEverest Extension Hub is a centralized discovery and distribution catalog for all installable extensions — Providers (spec 001), generic plugins (spec 003), and integrations that connect OpenEverest to external systems (starting with monitoring backends). It uses a **formula/pointer model**: a central git repository (`openeverest/hub`) holds small YAML metadata files that reference OCI artifacts hosted in their authors' own registries. A CI-generated JSON index powers a browseable website, the `everestctl` CLI, and an in-product UI for one-click discovery and installation. Artifacts are pinned by OCI digest on named channels (`stable`/`edge`), giving authors independent release cadence while providing users with strong supply-chain integrity guarantees.
 
 ## 2. Motivation
 
 OpenEverest v2 ships with zero providers or plugins preinstalled. The modular architecture introduced in spec 001 (Providers) and spec 003 (Generic Plugins) decouples the core platform from database engines and integrations. This creates an immediate need for users to **discover**, **evaluate**, and **install** extensions without requiring manual chart URL hunting or deep knowledge of the ecosystem.
+
+A third family of extensions does not fit either of those two: **integrations**, which connect OpenEverest to a system that lives outside it. The first area is monitoring — charts such as `monitoring-pmm`, `monitoring-prometheus`, and `monitoring-coroot` install a `MonitoringClass` and the controller that fulfils it, so database metrics flow to a PMM server, a Prometheus, or Coroot the user already runs. They are not database operators (Providers) and they do not extend OpenEverest's own UI, CLI, or API (generic plugins), yet users need to discover and install them the same way. Future areas include secrets/KMS, identity, logging, alerting, and backup storage.
 
 Existing challenges:
 
@@ -30,7 +32,8 @@ Package managers like Homebrew, Krew (kubectl plugins), and Artifact Hub have de
 
 **Goals:**
 
-* A single, unified discovery surface for all OpenEverest extensions (Providers and generic plugins).
+* A single, unified discovery surface for all OpenEverest extensions (Providers, generic plugins, and integrations).
+* Describe integrations with enough structured metadata (area, what they install, what they need from providers and from the external system) for users to pick one before installing it.
 * One-click / one-command install from both the `everestctl` CLI and the OpenEverest UI.
 * Independent release cadence for each extension author — no coupling to OpenEverest core releases.
 * A formula format that supports verification, signing, and federation as future extensions without schema-breaking changes.
@@ -48,6 +51,8 @@ Package managers like Homebrew, Krew (kubectl plugins), and Artifact Hub have de
 * Marketplace monetization, ratings, reviews, or download telemetry.
 * Plugin-to-plugin dependency resolution (extensions are installed independently).
 * Defining the generic plugin runtime model (that is spec 003's domain).
+* Defining integration runtime contracts (e.g. the monitoring `MonitoringClass` API) or computing provider ↔ integration compatibility in the hub — core owns both (§4.11).
+* Installing the external system an integration connects to (e.g. a Prometheus or PMM server) — the hub only points at it via `spec.install.prerequisites`.
 
 ## 4. Proposed Solution / Design
 
@@ -104,12 +109,13 @@ spec:
 
 Note: `digest` is omitted in Phase 1. It becomes required when Phase 2 (CLI install) ships, since digest pinning is a prerequisite for `helm install` from the CLI.
 
-Phase 1 introduces two optional, additive fields that ship from day one: `metadata.maturity` (lifecycle enum; defaults to `alpha` when omitted) and `spec.capabilities` (free-form annotation map advertising provider/plugin features). Both are surfaced by `everestctl extension list` and `info`. No schema enforcement applies in Phase 1; validation arrives in Phase 2 alongside the digest pinning requirement. The recommended (non-binding) capability vocabulary is published in `docs/CAPABILITIES.md` in the hub repo.
+Phase 1 introduces two optional, additive fields that ship from day one: `metadata.maturity` (lifecycle enum; defaults to `alpha` when omitted) and `spec.capabilities` (free-form annotation map advertising extension features). Both are surfaced by `everestctl extension list` and `info`. No schema enforcement applies in Phase 1; validation arrives in Phase 2 alongside the digest pinning requirement. The recommended (non-binding) capability vocabulary is published in `docs/CAPABILITIES.md` in the hub repo.
 
 **Two CLI commands** — no installer, no CRD, no UI, no Helm execution:
 
 ```
 everestctl extension list              # Fetch index.json, print a table of available extensions
+                                       #   --type provider|plugin|integration filters by type
 everestctl extension info <name>       # Print metadata + the exact helm install command to copy-paste
 ```
 
@@ -157,6 +163,8 @@ To install, run:
 
 The Phase 1 formula is a **strict subset** of the full schema. Adding `digest`, `verification`, `frontend`, and other fields in later phases is non-breaking. The `apiVersion: hub.openeverest.io/v1` field ensures clients can detect schema version if a breaking change were ever needed.
 
+The `integration` extension type (§4.3) is additive in the same way: a new `metadata.type` value, a new `spec.integration` block, and a new `extensions/integrations/` directory. Existing provider and plugin entries are unaffected, and clients that do not know the type can still list the entry and render its install command.
+
 | Phase | Adds | Formula changes |
 |-------|------|-----------------|
 | **1 — Developer preview** | Hub repo, simplified formula, static index, `list`/`info` CLI | Baseline + `metadata.maturity` and `spec.capabilities` introduced as optional fields |
@@ -196,12 +204,21 @@ openeverest/hub/
 │   │       ├── formula.yaml
 │   │       ├── README.md
 │   │       └── logo.svg
-│   └── plugins/
-│       ├── sql-browser/
+│   ├── plugins/
+│   │   ├── sql-browser/
+│   │   │   ├── formula.yaml
+│   │   │   ├── README.md
+│   │   │   └── logo.svg
+│   │   └── ai-copilot/
+│   │       ├── formula.yaml
+│   │       ├── README.md
+│   │       └── logo.svg
+│   └── integrations/
+│       ├── monitoring-pmm/
 │       │   ├── formula.yaml
 │       │   ├── README.md
 │       │   └── logo.svg
-│       └── ai-copilot/
+│       └── monitoring-prometheus/
 │           ├── formula.yaml
 │           ├── README.md
 │           └── logo.svg
@@ -226,12 +243,25 @@ openeverest/hub/
 
 **Conventions:**
 - Extension directory name = globally unique slug (lowercase, alphanumeric + hyphens).
+- Extensions live under the directory matching their `metadata.type`: `extensions/providers/<slug>/`, `extensions/plugins/<slug>/`, or `extensions/integrations/<slug>/`.
 - Each extension directory contains exactly one `formula.yaml`, one `README.md` (rendered on the website), and an optional `logo.svg`.
 - The `index/` directory is auto-generated and should not be hand-edited.
 
 ### 4.3 Formula Schema
 
 The formula is the core metadata unit. It is validated against `schemas/formula-v1.json` on every PR.
+
+**Extension types.** `metadata.type` selects one of three types, and the formula carries exactly one matching type-specific block under `spec`:
+
+| `metadata.type` | Block | What it is | Example |
+|---|---|---|---|
+| `provider` | `spec.provider` | A database operator integration that reconciles `Instance`s (spec 001). | `percona-server-mongodb` |
+| `plugin` | `spec.plugin` | Extends OpenEverest itself — UI, CLI, or backend API (spec 003). | `sql-browser` |
+| `integration` | `spec.integration` | Connects OpenEverest to an external system. The first `area` is `monitoring`: the chart installs one or more `MonitoringClass`es and the controller that fulfils them. | `monitoring-prometheus` |
+
+Integrations are grouped by `spec.integration.area`. Each area has its own required sub-block (`spec.integration.monitoring` for `area: monitoring`); new areas (secrets/KMS, identity, logging, alerting, backup storage, …) are added by extending the `area` enum with a matching block, without changing existing entries.
+
+> **Naming note.** Core also uses the word "integration" in `Provider.spec.monitoring.integrations`, which lists *operator-native* monitoring integrations (e.g. `pmm` built into the Percona operators). In the hub, `integration` is an extension type; a hub integration that relies on an operator-native one refers to it as `spec.integration.monitoring.nativeIntegration`.
 
 ```yaml
 # extensions/providers/percona-server-mongodb/formula.yaml
@@ -242,7 +272,7 @@ metadata:
   # Globally unique slug. Must match the directory name.
   name: percona-server-mongodb
   # Extension type discriminator.
-  type: provider  # provider | plugin
+  type: provider  # provider | plugin | integration
   displayName: "Percona Server for MongoDB"
   description: |
     Production-ready MongoDB clusters powered by the Percona Operator.
@@ -276,7 +306,8 @@ metadata:
   annotations: {}
 
 spec:
-  # --- Type-specific block (exactly one of `provider` or `plugin`) ---
+  # --- Type-specific block (exactly one of `provider`, `plugin`, or `integration`,
+  #     matching metadata.type; see the integration example below) ---
   provider:
     # Must match the Provider CR .metadata.name deployed by this chart.
     providerName: percona-server-mongodb
@@ -300,7 +331,7 @@ spec:
     kubernetes: ">=1.27"
 
   # --- Capability matrix (optional, free-form annotations) ---
-  # Advertises what this provider/plugin supports. Values may be scalar
+  # Advertises what this extension supports. Values may be scalar
   # (string/bool/number) or arrays of strings. Keys are free-form; see
   # docs/CAPABILITIES.md in the hub repo for the recommended vocabulary.
   # Dot-namespaced keys are a convention for grouping, not enforced.
@@ -385,27 +416,101 @@ spec:
       defaultValues: {}
 ```
 
+**Integration example.** An integration uses the same `metadata`, `compatibility`, `artifacts`, and `install` fields; only the type-specific block differs. `spec.install.prerequisites` is reused to describe the external system the integration connects to:
+
+```yaml
+# extensions/integrations/monitoring-prometheus/formula.yaml
+apiVersion: hub.openeverest.io/v1
+kind: Extension
+
+metadata:
+  name: monitoring-prometheus
+  type: integration
+  displayName: "Prometheus"
+  description: |
+    Send the metrics of OpenEverest database instances to a Prometheus run by
+    the Prometheus Operator.
+  categories: [monitoring, observability]
+  homepage: https://github.com/openeverest/monitoring-prometheus
+  sourceRepo: https://github.com/openeverest/monitoring-prometheus
+  license: Apache-2.0
+  maturity: alpha
+  maintainers:
+    - github: "openeverest"
+  icon: ./logo.svg
+
+spec:
+  integration:
+    # Required. Integration area; selects the area-specific block below.
+    area: monitoring  # enum: [monitoring]
+    # Required when area == monitoring.
+    monitoring:
+      # Required, at least one: MonitoringClass names the chart installs (DNS-1123 labels).
+      classes: [prometheus]
+      # Required, at least one: how the classes are fulfilled.
+      executionModes: [ExtensionManaged]  # ProviderManaged | ExtensionManaged
+      # Optional. What a provider's components must expose (ExtensionManaged).
+      requires:
+        metrics: true      # components expose OpenMetrics
+        connection: false  # components accept native-protocol connections from agents (e.g. Coroot)
+      # Optional. For ProviderManaged classes: the operator-native integration
+      # matched against Provider.spec.monitoring.integrations (e.g. `pmm`).
+      # nativeIntegration: pmm
+
+  compatibility:
+    openeverest: ">=2.0.0-dev.5"
+
+  artifacts:
+    chart:
+      defaultChannel: stable
+      channels:
+        stable:
+          ref: oci://ghcr.io/openeverest/charts/monitoring-prometheus
+          version: "0.1.0"
+          digest: "sha256:..."
+
+  install:
+    helm:
+      releaseName: monitoring-prometheus
+      namespace: everest-system
+    # For integrations, prerequisites describe the external system.
+    prerequisites:
+      - name: Prometheus Operator
+        description: "Renders the generated PodMonitors; a Prometheus must select them."
+        installUrl: https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack
+        helm:
+          oci: oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack
+          namespace: monitoring
+          createNamespace: true
+```
+
 **Field rules:**
 
 | Field | Required | Notes |
 |-------|----------|-------|
 | `metadata.name` | Yes | Must match directory name; globally unique; `[a-z0-9][a-z0-9-]*` |
-| `metadata.type` | Yes | `provider` or `plugin` |
+| `metadata.type` | Yes | `provider`, `plugin`, or `integration` |
 | `metadata.displayName` | Yes | Human-readable, max 64 chars |
 | `metadata.description` | Yes | Max 500 chars |
 | `metadata.license` | Yes | Valid SPDX identifier |
 | `metadata.maturity` | No | One of `alpha`, `beta`, `stable`, `deprecated`. Defaults to `alpha`. Independent of channels (release cadence) and of `health` (operational status). |
 | `metadata.access` | No | One of `public`, `gated`. Defaults to `public`. When `gated`, the catalog surfaces a vendor CTA instead of install instructions (§4.5). |
 | `metadata.maintainers` | Yes | At least one entry with `github` handle |
-| `spec.provider` or `spec.plugin` | Yes | Exactly one, matching `metadata.type` |
+| `spec.provider`, `spec.plugin`, or `spec.integration` | Yes | Exactly one, matching `metadata.type`. The other two are forbidden. |
+| `spec.integration.area` | Conditional | Required when `metadata.type == integration`. Enum: `monitoring` (more areas added later). Selects the required area-specific block. |
+| `spec.integration.monitoring` | Conditional | Required when `area == monitoring`. No additional properties. |
+| `spec.integration.monitoring.classes` | Conditional | Required, ≥ 1. `MonitoringClass` names the chart installs; each a DNS-1123 label. |
+| `spec.integration.monitoring.executionModes` | Conditional | Required, ≥ 1. Each `ProviderManaged` or `ExtensionManaged`, mirroring core's `MonitoringClass` execution modes. |
+| `spec.integration.monitoring.requires` | No | `ExtensionManaged` only: what a provider's components must expose. Optional booleans `metrics` (OpenMetrics endpoint) and `connection` (native-protocol connections from agents, plus pod annotations). No additional properties. |
+| `spec.integration.monitoring.nativeIntegration` | No | `ProviderManaged` only: the operator-native integration name matched against `Provider.spec.monitoring.integrations` (e.g. `pmm`). |
 | `spec.compatibility.openeverest` | Yes | Valid semver range |
-| `spec.capabilities` | No | Free-form `string -> scalar \| string[]` map advertising provider/plugin features. No taxonomy enforced in v1; see `docs/CAPABILITIES.md` for the recommended vocabulary. |
+| `spec.capabilities` | No | Free-form `string -> scalar \| string[]` map advertising extension features. No taxonomy enforced in v1; see `docs/CAPABILITIES.md` for the recommended vocabulary. |
 | `spec.artifacts.chart` | Conditional | Required unless `metadata.type == plugin` AND `spec.plugin.contributes.ui == true` AND all other contributes are false |
 | `spec.artifacts.frontend` | Conditional | Required when `spec.plugin.contributes.ui == true` |
 | `spec.artifacts.*.channels.*.digest` | Yes | SHA-256 OCI manifest digest |
 | `spec.verification` | No | Optional in v1 |
 | `spec.gated` | Conditional | Required iff `metadata.access == gated`. Must set `contactUrl` (valid URL). Optional `instructions` (≤ 200 chars) and `provider` (display name). |
-| `spec.install.prerequisites` | No | Optional list of companion charts/tools required before this extension's chart. Each entry needs `name`; optional `description`, `installUrl` (docs link), and a `helm` block (`oci` + `namespace` required; optional `version`, `createNamespace`, `defaultValues`) used to render an install command. Surfaced in the hub UI drawer and `everestctl extension info`. |
+| `spec.install.prerequisites` | No | Optional list of companion charts/tools required before this extension's chart. Each entry needs `name`; optional `description`, `installUrl` (docs link), and a `helm` block (`oci` + `namespace` required; optional `version`, `createNamespace`, `defaultValues`) used to render an install command. Surfaced in the hub UI drawer and `everestctl extension info`. For integrations, this describes the external system the integration connects to (e.g. the Prometheus Operator, a PMM server). |
 | `spec.install.helm.namespace` | Yes | Must be `openeverest-system` for providers |
 
 ### 4.4 Generated Index
@@ -454,6 +559,7 @@ On every merge to `main`, a GitHub Action regenerates `index/index.json`:
         "encryption.atRest": true,
         "encryption.inTransit": true
       },
+      "integration": null,
       "channels": {
         "chart": {
           "default": "stable",
@@ -487,6 +593,7 @@ Properties:
 - **`maturity`** — author-declared lifecycle stage from the formula (`alpha`, `beta`, `stable`, `deprecated`). Always emitted; the index applies the `alpha` default when the formula omits the field.
 - **`access`** — distribution mode from the formula (`public`, `gated`). Always emitted; the index applies the `public` default when the formula omits the field. When `gated`, the entry also carries a `gated` object copied verbatim from `spec.gated` (`contactUrl`, optional `instructions`, optional `provider`).
 - **`capabilities`** — verbatim copy of `spec.capabilities` from the formula. Emitted only when non-empty.
+- **`integration`** — verbatim copy of `spec.integration` for `type: integration` entries (e.g. `{"area": "monitoring", "monitoring": {"classes": ["prometheus"], "executionModes": ["ExtensionManaged"], "requires": {"metrics": true}}}`); `null` for providers and plugins. Lets the CLI and UI filter and describe integrations without fetching the formula.
 - **`install.prerequisites`** — verbatim copy of `spec.install.prerequisites` from the formula. Emitted only when non-empty; consumers (hub UI, `everestctl`) surface these before the install step.
 - **Signed** — `index.json.sig` is a cosign keyless signature (Sigstore transparency log) so consumers can verify the index hasn't been tampered with.
 
@@ -629,6 +736,7 @@ A future spec can flip verification fields to required, enforce signature verifi
 
 ```
 everestctl extension search <query>              # Search by name, keyword, category
+  --type <type>                                  # Filter by type (provider|plugin|integration)
   --maturity <level>                             # Filter by maturity (alpha|beta|stable|deprecated)
   --capability <key[=value]>                     # Filter by capability key/value (repeatable)
 everestctl extension info <name>                 # Show metadata, maturity, capabilities, channels, compatibility
@@ -638,7 +746,8 @@ everestctl extension install <name>              # Install from default channel
   --values <file>                                # Custom Helm values
   --dry-run                                      # Show what would be installed
   --allow-prerelease                             # Required to install extensions with maturity alpha or beta
-everestctl extension list                        # List installed extensions; includes Maturity column
+everestctl extension list                        # List installed extensions; includes Type and Maturity columns
+  --type <type>                                  # Filter by type, e.g. --type integration
 everestctl extension upgrade <name>              # Upgrade to channel head
   --all                                          # Upgrade all installed
 everestctl extension uninstall <name>            # Remove extension and cleanup
@@ -654,8 +763,8 @@ Maturity gating: when the resolved extension has `maturity: alpha` or `maturity:
 
 #### UI (Extensions page)
 
-- **Browse** — grid/list view of available extensions with category filters, search, type tabs (Providers / Plugins), maturity badge on each card, maturity filter chip (default hides `alpha` and `deprecated`), a "Gated" badge on cards where `access == gated`, an "Include gated" filter toggle (default on), and capability filter facets auto-populated from observed keys in the index.
-- **Detail** — extension page showing description, README, channels, version history, verification status, compatibility, maturity badge with explanatory tooltip, and a capability matrix table rendered from `capabilities`.
+- **Browse** — grid/list view of available extensions with category filters, search, type tabs (Providers / Plugins / Integrations), maturity badge on each card, maturity filter chip (default hides `alpha` and `deprecated`), a "Gated" badge on cards where `access == gated`, an "Include gated" filter toggle (default on), and capability filter facets auto-populated from observed keys in the index.
+- **Detail** — extension page showing description, README, channels, version history, verification status, compatibility, maturity badge with explanatory tooltip, and a capability matrix table rendered from `capabilities`. Integration pages also show the area and its details (for monitoring: the `MonitoringClass`es installed, execution modes, provider requirements, and native integration) and list the external-system prerequisites before the install action.
 - **Install** — one-click install with channel selector and optional values override (rendered from `valuesSchema` if available). When the extension's maturity is `alpha`, `beta`, or `deprecated`, the install modal explicitly surfaces this and requires the user to confirm before proceeding. When `access == gated`, the install section is replaced with a **"Contact vendor"** primary button linking to `gated.contactUrl` plus the optional `instructions` text and "Provided by {provider}" line; no chart reference, version, channel selector, or command snippet is rendered.
 - **Installed** — list of installed extensions with current version, channel, available upgrades, maturity, and health status.
 - **Upgrade** — one-click upgrade to channel head with diff preview.
@@ -673,7 +782,7 @@ metadata:
 spec:
   # Reference back to hub metadata.
   extensionName: percona-server-mongodb
-  type: provider
+  type: provider  # provider | plugin | integration
   catalogId: openeverest-official
   channel: stable
   version: "0.7.2"
@@ -711,6 +820,7 @@ A reconciler in OpenEverest core watches `InstalledExtension` resources to:
 3. **Upgrade** — resolves current channel head from the index; if the digest differs from installed, the upgrade is available. Pulls and installs the new digest.
 4. **Downgrade** — explicit `--version` flag allows installing an older version from the same channel (if the author still lists it, or user provides direct OCI ref). A warning is shown.
 5. **Multiple channels** — a user can switch channels (`everestctl extension install <name> --channel edge`); this is treated as a fresh install of that channel's head.
+6. **Integration ↔ provider compatibility** — whether an integration works with a given provider is decided by core at runtime, not by the hub. For monitoring, core computes it per Provider from `Provider.spec.monitoring` and publishes it in `MonitoringClass.status.providers` (which providers can use the class and in which execution mode). The hub only advertises the integration's side of the contract — `requires.metrics`, `requires.connection`, and `nativeIntegration` — so users can anticipate compatibility before installing. Computing a full provider × integration compatibility matrix in the hub would require providers to publish matching monitoring capabilities in their formulas; this is future work (§7).
 
 ### 4.12 Author Publishing Workflow
 
@@ -751,6 +861,8 @@ For high-velocity authors, a **GitHub Action template** is provided that automat
 * [ ] `InstalledExtension` CRD registered in cluster; reconciler running in OpenEverest core.
 * [ ] Provider `percona-server-mongodb` published as the first formula and installable end-to-end via CLI and UI.
 * [ ] At least one generic plugin with a frontend bundle published and installable end-to-end (validates the frontend-OCI path).
+* [ ] Monitoring integrations (`monitoring-pmm`, `monitoring-prometheus`, `monitoring-coroot`) published under `extensions/integrations/` with a `spec.integration` block validated by `schemas/formula-v1.json`, and the index emits the `integration` field.
+* [ ] `everestctl extension search|list` support `--type provider|plugin|integration`, and the UI Extensions page has an Integrations tab.
 * [ ] `docs/PUBLISHING.md` written — step-by-step guide for extension authors.
 * [ ] `docs/VERIFIED-PUBLISHER.md` written — criteria and process for earning the badge.
 * [ ] `docs/SUPPLY-CHAIN.md` written — best practices for signing and attestation.
@@ -801,10 +913,17 @@ For high-velocity authors, a **GitHub Action template** is provided that automat
 
 14. **Gated-extension automation** — the current design stops at a "Contact vendor" CTA. Follow-up questions: (a) should `spec.gated` grow a `licenseKeyEndpoint` for the vendor to validate a key entered in the UI, (b) should a `pullSecretRef` field be added so a resolved key can inject a Kubernetes `imagePullSecret` for a private OCI chart, (c) should `everestctl` add a `--gated-acknowledged` escape hatch for users who have obtained credentials out-of-band? All three fit on the existing block without a schema break.
 
+15. **Hub-side integration compatibility matrix** — core computes provider ↔ integration compatibility at runtime (§4.11). To show a matrix in the hub before anything is installed, provider formulas would need a richer capability declaration mirroring `Provider.spec.monitoring` (component types exposing metrics or accepting connections, supported native integrations and agent versions). Should that be a structured `spec.provider.monitoring` block, or stay in free-form `capabilities`? Deferred until the monitoring API stabilises.
+
+16. **Further integration areas** — which areas come next (secrets/KMS, identity, logging, alerting, backup storage), and does each need its own area-specific block, or can some be described by `categories` and `prerequisites` alone?
+
+17. **Integration prerequisites automation** — should `everestctl extension install` offer to install an integration's external system from `spec.install.prerequisites[].helm`, or keep it informational? Installing a monitoring backend is usually an operator decision outside OpenEverest.
+
 ## 8. References
 
 * [Spec 001 — Plugins Architecture (Providers)](./001-plugins-architecture.md)
 * [Spec 003 — Generic Plugins (Extensions)](./003-generic-plugins.md)
+* [openeverest/monitoring-prometheus](https://github.com/openeverest/monitoring-prometheus) — reference monitoring integration (`MonitoringClass` + controller)
 * [Homebrew formulae](https://docs.brew.sh/Formula-Cookbook) — pointer model with centralized index
 * [Krew plugin index](https://krew.sigs.k8s.io/docs/developer-guide/release/new-plugin/) — YAML manifests in a central git repo
 * [Artifact Hub](https://artifacthub.io/) — CNCF metadata hub for Helm, OLM, Krew, etc.
