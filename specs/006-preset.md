@@ -429,9 +429,7 @@ The OpenEverest UI fetches available Presets from a provider.
 
 **Phase 1 UI Flow for creating Instance:**
 
-1. **User Selects Preset**: (Phase 2: the selection of namespace happens before the selection of preset)
-
-2. **Select field with list of presets**: UI fetches both `ClusterInstancePresets` and `InstancePresets` for selected provider. (Phase 1: support cluster-scope `ClusterInstancePresets` only, Phase 2: also support namespace-scope `InstancePresets`)
+1. **Select field with list of presets**: UI fetches both `ClusterInstancePresets` and `InstancePresets` for selected provider. (Phase 1: support cluster-scope `ClusterInstancePresets` only, Phase 2: also support namespace-scope `InstancePresets` and user selection of namespace happens before fetching `InstancePreset`)
    ```
    GET /clusters/{cluster}/cluster-instance-presets?provider=percona-server-mongodb
    ```
@@ -440,7 +438,9 @@ The OpenEverest UI fetches available Presets from a provider.
    GET /clusters/{cluster}/namespaces/{namespace}/instance-presets?provider=percona-server-mongodb
    ```
 
-3. **User Selects Namespace**:
+2. **User Selects Namespace**:
+
+3. **User Selects Preset**:
 
 4. **Pre-fill Form**: UI populates Instance creation form with the selected Preset values
 
