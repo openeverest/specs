@@ -42,7 +42,7 @@ Problems today:
 *   A schema mistake is caught on the author's machine, at build time.
 *   A new prop cannot reach a provider before the UI knows it.
 *   An installed provider keeps working after a core upgrade.
-*   The update path, minor and major, runs for real before GA, not for the first time after it.
+*   The update path runs for real before GA, not for the first time after it.
 
 **Non-Goals:**
 
@@ -84,8 +84,9 @@ The UI owns the definition because the meaning of a prop is set by the code that
 - The contract has a version `MAJOR.MINOR`.
   - **Minor:** additive. A new `uiType`, prop or allowed value. Every document that was valid stays valid and keeps its meaning.
   - **Major:** anything else. Removing or renaming a prop, changing its type or its meaning.
-- **The contract starts at `0.1`, and the rules above apply from the first version.** An additive change bumps the minor, a breaking one bumps the major: `0.2` → `1.0` → `1.1` → `2.0`. There is no separate set of rules before GA, and the contract does not have to be at a particular number at GA.
-- **Before GA breaking changes are expected**, so the major may change several times. This runs the whole update path before GA: a contract change, the regenerated schema, the version written by the generators, and both the minor and the major rule in the UI.
+- **The contract starts at `0.1`.** Every vocabulary change bumps the version. Until GA a minor bump may also be breaking; the contract changelog marks each bump as additive or breaking. No breaking change is planned; the allowance means that one, if needed, does not force a major bump before GA.
+- **From GA on, the minor and major rules above apply strictly**, whatever the number is at that point. The contract does not have to reach `1.0` by GA: the major changes only when a breaking change is made after GA.
+- Bumping the version before GA runs the update path early: a contract change, the regenerated schema, the version written by the generators and the version check in the UI.
 - The version is declared once, in the contract package, and generated into Go next to the schema, so Go tools read it instead of repeating the number.
 - Objects carry it in a typed CRD field, `spec.uiSchemaVersion`, on `Provider`, `BackupClass`, `BackupStorageClass` and `MonitoringClass`.
   - Optional string in the form `MAJOR.MINOR`.
@@ -131,6 +132,8 @@ Each producer writes `spec.uiSchemaVersion` and fails when `uischema.Validate` r
 | Another major | The form is not rendered and shows a clear message. |
 | No version | Strict validation, no version rule. |
 
+Before GA, a breaking minor shows up in the first row: a schema built for an older `0.x` fails strict validation and gets the error state until the provider is regenerated.
+
 **In core.** No check for now: the generators and the UI catch almost everything. Core never rejects an object because of its uiSchema, so an installed provider keeps working after a core upgrade. If invalid schemas are seen reaching clusters, core reports them with a `UISchemaValid` condition in `status.conditions`, not with an admission webhook or Events ([openeverest#3490](https://github.com/openeverest/openeverest/issues/3490)).
 
 ### 4.6 Change Process
@@ -143,7 +146,7 @@ The build-time check enforces this order: a prop the contract does not know fail
 
 - **CRD API.** One new optional field on four kinds. It is public API, so its name is final once released.
 - **`provider-runtime`.** Gains a generated directory that UI PRs can change. BE reviews those changes.
-- **Major bumps.** A major bump stops every form built for the previous major until its producer is regenerated, including forms the breaking change does not touch. Before GA this is accepted; it is how the major rule gets tested.
+- **Major bumps.** A major bump stops every form built for the previous major until its producer is regenerated, including forms the breaking change does not touch.
 - **Providers.** They get the structural check when they bump core. `generate` can start failing on schemas with typos or unknown props, which is intended.
 - **`provider-sdk`.** A small change: pass the BackupClass, secret and configMap schemas to `Validate`, and write `spec.uiSchemaVersion`.
 - **Class generators.** `pkg/classgen` and `hack/gen-backupstorageclasses` need to write the version and run the check. Neither handles a uiSchema today.
@@ -164,8 +167,8 @@ The build-time check enforces this order: a prop the contract does not know fail
 | Alternative | Why not |
 |-------------|---------|
 | Staying at `1.0` before GA, with changes that do not bump it | The update path would run for the first time after GA. |
-| A pre-release suffix before GA, e.g. `1.0-dev.3` | Needs a third component and pre-release ordering in both Go and TS, and still leaves the major rule untested before GA. |
-| `0.x` before GA with breaking minors, then a freeze as `1.0` | Two sets of rules, a renumbering at GA and a special rule for providers built against the last `0.x`. The major rule would run for the first time after GA. |
+| A pre-release suffix before GA, e.g. `1.0-dev.3` | Needs a third component and pre-release ordering in both Go and TS. `0.x` says the same in the `MAJOR.MINOR` form. |
+| Freezing the contract as `1.0` at GA | Forces a renumbering at GA and a special rule for providers built against the last `0.x`. Tying the stability rule to GA needs neither. |
 | A reserved `schemaVersion` key inside `uiSchema` | Clashes with topology and form names, is untyped and is not visible in `kubectl`. |
 | JSON Schema or Go types as the hand-written source | The UI would still need hand-written types and a runtime check, which is the duplication this spec removes. |
 | A separate Go entry point for the structural check | `provider-sdk generate` already calls `uischema.Validate` and fails on its issues; one entry point means a core bump is enough to get new checks. |
@@ -177,6 +180,7 @@ The build-time check enforces this order: a prop the contract does not know fail
 2.  **`BackupStorageClass`.** It got a `spec.uiSchema` in [openeverest#3508](https://github.com/openeverest/openeverest/pull/3508), after the questions in [openeverest#3480](https://github.com/openeverest/openeverest/issues/3480) were written. Is it right to treat it as a sixth envelope, with `hack/gen-backupstorageclasses` writing the version and running the check?
 3.  **`MonitoringClass` through `pkg/classgen`.** classgen renders parameter schemas and validations only, and the `MonitoringClass` uiSchema is written by hand in the backend's chart (e.g. `charts/monitoring-pmm/templates/monitoringclass.yaml`). What should the check look like there: a classgen command that validates the uiSchema and prints the version for the chart?
 4.  **Older core.** When a manifest that sets `spec.uiSchemaVersion` is installed on a core whose CRD does not have the field yet, is the field dropped or is the install rejected? §4.3 accepts an object without the field, so it needs to be dropped.
+5.  **Strict rules before GA.** §4.3 lets a minor bump be breaking until GA. The alternative is to apply the minor and major rules from the first version, so that a breaking change bumps the major before GA too (`0.2` → `1.0` → `2.0`). That would run the major rule before GA instead of for the first time after it. The cost is that a major bump stops every form built for the previous major, where a breaking minor stops only the schemas that use the changed prop. Which do we want?
 
 ## 8. References
 
