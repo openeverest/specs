@@ -42,7 +42,7 @@ Problems today:
 *   A schema mistake is caught on the author's machine, at build time.
 *   A new prop cannot reach a provider before the UI knows it.
 *   An installed provider keeps working after a core upgrade.
-*   The update path runs for real before GA, not for the first time after it.
+*   The update path, minor and major, runs for real before GA, not for the first time after it.
 
 **Non-Goals:**
 
@@ -84,8 +84,8 @@ The UI owns the definition because the meaning of a prop is set by the code that
 - The contract has a version `MAJOR.MINOR`.
   - **Minor:** additive. A new `uiType`, prop or allowed value. Every document that was valid stays valid and keeps its meaning.
   - **Major:** anything else. Removing or renaming a prop, changing its type or its meaning.
-- **Before the freeze the major is `0`.** The first version is `0.1`, and every vocabulary change bumps the minor. While the major is `0` a minor bump may also be breaking; the contract changelog marks each bump as additive or breaking. This runs the whole update path before GA: a contract change, the regenerated schema, the version written by the generators and the version check in the UI.
-- **`1.0` is the freeze.** It happens before GA, once the vocabulary is settled. `1.0` is the last `0.x` with no changes, and the contract package records which `0.x` that is. From `1.0` on, the minor and major rules above apply strictly.
+- **The contract starts at `0.1`, and the rules above apply from the first version.** An additive change bumps the minor, a breaking one bumps the major: `0.2` → `1.0` → `1.1` → `2.0`. There is no separate set of rules before GA, and the contract does not have to be at a particular number at GA.
+- **Before GA breaking changes are expected**, so the major may change several times. This runs the whole update path before GA: a contract change, the regenerated schema, the version written by the generators, and both the minor and the major rule in the UI.
 - The version is declared once, in the contract package, and generated into Go next to the schema, so Go tools read it instead of repeating the number.
 - Objects carry it in a typed CRD field, `spec.uiSchemaVersion`, on `Provider`, `BackupClass`, `BackupStorageClass` and `MonitoringClass`.
   - Optional string in the form `MAJOR.MINOR`.
@@ -129,10 +129,7 @@ Each producer writes `spec.uiSchemaVersion` and fails when `uischema.Validate` r
 | Same major, minor ≤ UI | Strict validation. A valid schema renders; an invalid one shows an explicit error state for that form. |
 | Same major, newer minor | Renders. Unknown props and unknown `uiType`s are ignored, and the form shows a notice to update OpenEverest. |
 | Another major | The form is not rendered and shows a clear message. |
-| The last `0.x`, on a UI at `1.y` | Treated as `1.0`, because the two are the same vocabulary. A provider installed before the freeze keeps working after the upgrade. |
 | No version | Strict validation, no version rule. |
-
-While the major is `0`, a breaking minor shows up in the first row: a schema built for an older `0.x` fails strict validation and gets the error state until the provider is regenerated.
 
 **In core.** No check for now: the generators and the UI catch almost everything. Core never rejects an object because of its uiSchema, so an installed provider keeps working after a core upgrade. If invalid schemas are seen reaching clusters, core reports them with a `UISchemaValid` condition in `status.conditions`, not with an admission webhook or Events ([openeverest#3490](https://github.com/openeverest/openeverest/issues/3490)).
 
@@ -146,6 +143,7 @@ The build-time check enforces this order: a prop the contract does not know fail
 
 - **CRD API.** One new optional field on four kinds. It is public API, so its name is final once released.
 - **`provider-runtime`.** Gains a generated directory that UI PRs can change. BE reviews those changes.
+- **Major bumps.** A major bump stops every form built for the previous major until its producer is regenerated, including forms the breaking change does not touch. Before GA this is accepted; it is how the major rule gets tested.
 - **Providers.** They get the structural check when they bump core. `generate` can start failing on schemas with typos or unknown props, which is intended.
 - **`provider-sdk`.** A small change: pass the BackupClass, secret and configMap schemas to `Validate`, and write `spec.uiSchemaVersion`.
 - **Class generators.** `pkg/classgen` and `hack/gen-backupstorageclasses` need to write the version and run the check. Neither handles a uiSchema today.
@@ -159,7 +157,6 @@ The build-time check enforces this order: a prop the contract does not know fail
 *   `provider-sdk generate` validates every schema it assembles and writes the version ([openeverest#3489](https://github.com/openeverest/openeverest/issues/3489)).
 *   The class generators write the version and run the check (no issue yet).
 *   The UI validates schemas in the browser and applies the version rules of §4.5 ([openeverest#3488](https://github.com/openeverest/openeverest/issues/3488)).
-*   The contract is frozen as `1.0` before GA.
 *   The docs for provider authors describe the version, the compatibility rules and the change process, and a contract changelog exists ([openeverest#3491](https://github.com/openeverest/openeverest/issues/3491)).
 
 ## 6. Alternatives Considered
@@ -167,7 +164,8 @@ The build-time check enforces this order: a prop the contract does not know fail
 | Alternative | Why not |
 |-------------|---------|
 | Staying at `1.0` before GA, with changes that do not bump it | The update path would run for the first time after GA. |
-| A pre-release suffix before GA, e.g. `1.0-dev.3` | Needs a third component and pre-release ordering in both Go and TS. `0.x` says the same in the `MAJOR.MINOR` form. |
+| A pre-release suffix before GA, e.g. `1.0-dev.3` | Needs a third component and pre-release ordering in both Go and TS, and still leaves the major rule untested before GA. |
+| `0.x` before GA with breaking minors, then a freeze as `1.0` | Two sets of rules, a renumbering at GA and a special rule for providers built against the last `0.x`. The major rule would run for the first time after GA. |
 | A reserved `schemaVersion` key inside `uiSchema` | Clashes with topology and form names, is untyped and is not visible in `kubectl`. |
 | JSON Schema or Go types as the hand-written source | The UI would still need hand-written types and a runtime check, which is the duplication this spec removes. |
 | A separate Go entry point for the structural check | `provider-sdk generate` already calls `uischema.Validate` and fails on its issues; one entry point means a core bump is enough to get new checks. |
