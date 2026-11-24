@@ -3,7 +3,7 @@
 *   **Status:** Draft
 *   **Authors:** @recharte
 *   **Created:** 2026-05-07
-*   **Last Updated:** 2026-09-16
+*   **Last Updated:** 2026-11-24
 *   **Related Issues:** [openeverest#3009](https://github.com/openeverest/openeverest/issues/3009), [openeverest#3104](https://github.com/openeverest/openeverest/pull/3104)
 
 ---
@@ -189,7 +189,7 @@ These semantics apply to the ConfigMap artifact. A store with per-object granula
 
 *   Generation MUST fail on an uncategorized resource instead of falling back to a default (`instance-presets` relies on such a fallback today; `plugins` was missing from `AllResources` entirely — admin lockout — until [#3104](https://github.com/openeverest/openeverest/pull/3104) added it, cluster-scoped).
 *   `AllResources` is generated from the OpenAPI path map, which cannot surface resources without endpoints; if non-endpoint resources are ever introduced (e.g. reserved management names, §4.2), the generator must support hand-merging them into the list.
-*   A CI check asserts `AllResources` ⊆ (Global ∪ ClusterScoped ∪ ClusterNamespaced) over the merged list. One tier table feeds `loadAdminPolicy`, the validator, and the 014 compiler.
+*   A CI check asserts `AllResources` ⊆ (Global ∪ ClusterScoped ∪ ClusterNamespaced) over the merged list. One tier table feeds `loadAdminPolicy`, the validator, and the draft policy-store compiler (§4.11).
 
 ### 4.8 Threat Model
 
@@ -198,11 +198,11 @@ These semantics apply to the ConfigMap artifact. A store with per-object granula
 | Everest RBAC is the **sole tenant boundary** | The Everest service account is fully privileged on managed clusters; nothing below this layer separates tenants. |
 | ConfigMap write = RBAC root | Protect `everest-rbac` with Kubernetes RBAC; manage policy via GitOps for review and rollback. |
 | IdP claims are trusted input | Group claims are Casbin subjects and `g(x, x)` identity-matches — an OIDC group named `role:super-admin` would inherit that role; reserved-prefix rejection is the *only* thing separating subjects from roles. `role:`/`everest:` claims are rejected at every subject source — OIDC `sub`, OIDC `groups` (every value), local-account sessions, plugin daemon tokens — applied to the *resolved* subject (after the internal issuer's colon-truncation), plus at local-account creation. `everest:authenticated` is appended inside the enforcer wrapper, after rejection. Table test over all four sources; docs call out IdP group hygiene. |
-| Users and Groups share one Casbin namespace | A local account named like an IdP group (or vice versa) silently inherits its roles — with self-service IdP group creation, an escalation. Subject-kind prefixing (`user:`/`group:`, designed in draft spec 014 §4.3) closes this structurally; until it lands, operators MUST ensure the IdP forbids self-asserted group values. |
+| Users and Groups share one Casbin namespace | A local account named like an IdP group (or vice versa) silently inherits its roles — with self-service IdP group creation, an escalation. Subject-kind prefixing (`user:`/`group:`, designed in the draft policy-store spec §4.3) closes this structurally — compiler-side, so it holds under any engine (Apache Casbin's new `TypedName` targets the same collision but would tie the fix to Casbin, §4.11); until it lands, operators MUST ensure the IdP forbids self-asserted group values. |
 | `backup-classes:create/update` is not a routine grant | `BackupClass.spec.job.*.permissions`/`clusterPermissions` are arbitrary `rbacv1.PolicyRule`s minted into a job ServiceAccount (the manager holds `escalate`/`bind` for this) — effectively **cluster-admin on the targeted managed cluster**, executed via `backups:create`/`restores:create`. Treat as privileged; `validate` warns on it (§4.6). Bounding the primitive is a separate workstream. |
 | Object injection | Impossible — all segments are DNS-1123 names, enforced per §4.1. |
 | Plugin backends | Proxy-only after JWT + `plugins:use`, every method (§4.2); `Authorization`/`Cookie` stripped for a per-plugin credential — forwarding the caller's JWT (especially to `externalUrl`) is credential exfiltration. External backends are an egress boundary; a plugin with its own credentials is bounded only by its own authorization — installing one is privileged. `plugin-context` is advisory, never an authorization input, and must not disclose the caller's group list. Plugin daemon tokens are hard-denied writes to core resources — the denylist is re-keyed to the v2 vocabulary, applied at one chokepoint the proxy also passes through, and fails closed on unknown names (today: keyed to v1 constants and bypassed by the proxy). |
-| Delegated policy write = latency amplification | Policy size multiplies every enforce call, so a delegated policy author can degrade authorization globally. Any store offering delegation must cap compiled policy size (the CR candidate does — draft 014 §4.10). |
+| Delegated policy write = latency amplification | Policy size multiplies every enforce call, so a delegated policy author can degrade authorization globally. Any store offering delegation must cap compiled policy size (the CR candidate does — draft policy-store spec §4.10). |
 | `clusters` write actions (future) | Cluster registration attaches remote-cluster credentials — a `backup-classes`-class grant. Read-only today; priced now so the endpoints don't land ungated. |
 | Management API (planned) | Policy-editing endpoints need a privilege-escalation guard (grant only what you hold — `escalate`/`bind` semantics) and a last-admin lockout guard. |
 | UI filtering | UX only, never a control. The server-side handler chain is the enforcement point. |
@@ -265,16 +265,16 @@ Multi-tenant isolation (per-customer clusters) is the prod-admin pattern with a 
 Three contracts, all specified in OpenAPI now (even where implementation lands post-GA) — the UI must never parse raw tuples, because two matcher implementations in two languages will drift:
 
 *   **`GET /permissions`** — *resolved, structured* permissions per resource/action/object-pattern, each carrying the granting role (provenance). **Action terms are always expanded, never a literal `*`** (so `read-connection` inside a wildcard grant is visible; action axis only — expanding objects would be an enumeration oracle). Same expansion in `rbac can`/`validate --dry-run`. A zero-grant result is explicit; the UI renders a dedicated "no access — ask your administrator" empty state, not a generic "nothing here". Optional `?cluster=&namespace=`; short-TTL caching is fine (advisory).
-*   **`POST /self-access-reviews`** — any authenticated user; a batch of `(resource, action, object)` triples (`maxItems: 256`, 400 over-cap) returning per-triple decisions: one call per rendered page decides every button, no client-side matcher. Scope views can't express per-item grants; embedding `allowedActions` in list items breaks the no-DTO rule. Implementation: resolve the caller's permission set **once**, match locally (`BatchEnforce` is a bare loop — not a mitigation, §7.3); the local matcher is the same `GlobMatch`, differential-tested against `Enforce`.
+*   **`POST /self-access-reviews`** — any authenticated user; a batch of `(resource, action, object)` triples (`maxItems: 256`, 400 over-cap) returning per-triple decisions: one call per rendered page decides every button, no client-side matcher. Scope views can't express per-item grants; embedding `allowedActions` in list items breaks the no-DTO rule. Implementation: resolve the caller's permission set **once**, match locally (`BatchEnforce` is a bare loop — not a mitigation, §7.3); the local matcher is the same `GlobMatch`, differential-tested against the engine through the `Authorizer` interface (§4.11).
 *   **`POST /access-reviews`** — admin-gated, same bound; evaluates *any* subject, returns `{allowed, matchedBy[]}` — the "why is this denied" answer. The self/any split mirrors `SelfSubjectAccessReview`/`SubjectAccessReview`: reviewing others is itself a permission.
 
 No “RBAC disabled → show everything” UI branch: the enforcer is always on (§4.6). Migration off the UI's in-browser `casbin.js` matching (~40 files) is phased **in work, not contract**: `/self-access-reviews` first, page-by-page; `/permissions` changes shape once (own client, no GA install to strand); “no `casbin.js` import in `ui/`” is the exit criterion.
 
 ### 4.11 Policy Store
 
-**The GA policy store is an open decision** (§7.1). The ConfigMap `policy.csv` is the current, pre-GA transitional store and is never documented as the GA interface. The leading candidate is Kubernetes CRs (`AccessRole`/`AccessBinding`), fully designed in **draft spec 014** — structured schema with compiler-owned arity, per-object failure granularity, delegation via Kubernetes RBAC; the alternative is hardening the ConfigMap, whose costs (1MiB ceiling, whole-file failure model, no delegation) are catalogued in 014 §2.
+**The GA policy store is an open decision** (§7.1). The ConfigMap `policy.csv` is the current, pre-GA transitional store and is never documented as the GA interface. The leading candidate is Kubernetes CRs (`AccessRole`/`AccessBinding`), fully designed in a **draft policy-store spec** (numbered when proposed) — structured schema with compiler-owned arity, per-object failure granularity, delegation via Kubernetes RBAC; the alternative is hardening the ConfigMap, whose costs (1MiB ceiling, whole-file failure model, no delegation) the draft's §2 catalogues.
 
-Enforcement is deliberately storage-agnostic: handlers call `enforce()` and the store sits behind the adapter, so nothing else in this spec depends on the outcome — the vocabulary, enforcement semantics, and failure principles bind any store.
+Enforcement is deliberately **storage- and engine-agnostic**. Handlers, the plugin proxy, `/permissions` and the review endpoints depend on one `Authorizer` interface in `pkg/rbac`; no Casbin type crosses it, and the store sits behind the adapter. The public contract is the vocabulary (§4.2–§4.3), the §4.10 shapes and the store's authoring format — never an engine's policy language; Casbin is the current implementation. Nothing else in this spec depends on the store outcome, and replacing the engine (§6) stays internal work — **provided the GA authoring format is not Casbin's own**: a `policy.csv` GA store would make Casbin's format public and couple the two decisions.
 
 ### 4.12 GA Audit Minimum
 
@@ -282,7 +282,7 @@ Full per-decision audit logging stays deferred (§7.2). Four cheap, bounded item
 
 *   **Every successful `read-connection`** logs one structured line `{ts, subject, cluster, namespace, instance}` — one low-frequency endpoint, no LIST amplification; otherwise credential *use* is untracked.
 *   **Structured denial logs on single-object and write paths** with the missing `resource:action:object`. Per-item LIST denials are excluded — counted, not logged (the per-row warning logged today is a defect this fixes).
-*   **Policy-change auditability** = a documented Kubernetes audit-policy stanza for writes to the policy-store objects (the ConfigMap today; CRs if the 014 candidate is adopted), with approver/diff/revert via GitOps.
+*   **Policy-change auditability** = a documented Kubernetes audit-policy stanza for writes to the policy-store objects (the ConfigMap today; CRs if the CR candidate is adopted), with approver/diff/revert via GitOps.
 *   Prometheus counter `everest_rbac_denials_total{resource,action}` on every deny — turns deny-by-default friction from anecdote into data.
 
 ## 5. Definition of Done
@@ -301,7 +301,7 @@ Full per-decision audit logging stays deferred (§7.2). Four cheap, bounded item
 *   `create-from-preset` exact-match = `spec` + metadata allowlist; mismatch 403s name field paths; action renamed from `deploy` in code.
 *   Plugin proxy: JWT + `plugins:use` on `cluster/name`, every method; bundles from the declared asset path only; `Authorization`/`Cookie` stripped; the PoC `plugin/<name>` string and `ActionAll` shortcut removed. (Catalog/context filtering: [#3104](https://github.com/openeverest/openeverest/pull/3104).)
 *   Uniform 403 before fetch on reads; LIST post-filtering with deny-and-continue; namespace listing works for non-admins (2-segment objects).
-*   One shared enforcer accessor (handler chain, plugin proxy — today a second independent enforcer — and `/permissions`); reloads swap a fresh enforcer via `atomic.Pointer`, never `LoadPolicy` in place; informer handles Add/Update/Delete.
+*   One `Authorizer` interface in `pkg/rbac` (§4.11) shared by the handler chain, the plugin proxy — today a second independent enforcer — `/permissions` and the review endpoints; no Casbin type crosses it. Reloads swap a fresh enforcer via `atomic.Pointer`, never `LoadPolicy` in place; informer handles Add/Update/Delete.
 
 **Validation, tooling & failure modes:**
 *   Pattern-form/arity/vocabulary validation (§4.6) in `validate` and at load; `can` handles all three arities; per-position charsets; the no-enforce-errors property test.
@@ -329,12 +329,24 @@ Full per-decision audit logging stays deferred (§7.2). Four cheap, bounded item
 
 **Custom matcher where `*` crosses `/`** — rejected: doublestar already supplies `**` for this and validation bans it (§4.6); a friendlier wildcard hides scope mistakes that arity validation surfaces loudly. (Argo CD is the cautionary example, not precedent: its glob does not treat `/` as a separator, and its docs must tell authors to "always use four slashes" — unenforced discipline where arity validation enforces it.)
 
+**A different policy engine** — the engine is internal (§4.11), so this is a reversible implementation choice, recorded here with each candidate's reopen trigger. Precedent: CNCF-adjacent products with their own API and domain objects own their RBAC model — Argo CD and the Backstage RBAC plugin embed Casbin, Harbor uses fixed project roles — and external engines appear only as hooks (Envoy/Istio `ext_authz`, the Kubernetes webhook authorizer, Backstage's pluggable `PermissionPolicy`). None makes end users author Rego, Cedar or OpenFGA models as the native format.
+
+**OPA/Rego** — a general-purpose policy language (CNCF graduated). If we write the Rego and customers supply roles as data, it adds weight and nothing over the current engine; if customers write Rego, policy becomes a program that is hard to review and loses §4.6's local reasoning. Its strength — one language for admission and application policy — is not our problem. Reopen: not as the native model; enterprises standardized on a central OPA are served by the §7.5 hook.
+
+**Cedar** — purpose-built for application authorization: schema-typed entities (closing §4.8's user/group collision by construction), a verified evaluator, and SMT-based policy analysis. Our model maps cleanly (`Cluster ⊃ Namespace ⊃ Instance`, `like` for `dev-*`, `forbid` simply never compiled). Not now: the Go implementation (cedar-go v1.9) lacks the schema validator (experimental only), partial evaluation and policy templates — the features that make Cedar better than what we have are Rust-only, and AWS's Go Cedar-for-Kubernetes was retired for that reason. Reopen: label-based grants, time-bound or break-glass access, creator-owns-instance, or cedar-go reaching validator and partial-evaluation parity. The leading candidate if the engine changes.
+
+**OpenFGA / Zanzibar-style ReBAC** — the wrong shape: every namespace and instance across N managed clusters becomes a relationship record to sync (or pass on every check), name globs (`dev-*`, `*/dev/*`) are unrepresentable, and it needs PostgreSQL or MySQL — a stateful dependency in an install whose only state is etcd. Reopen: per-object sharing or delegated ownership as product features.
+
+**Kubernetes RBAC via mapped identities** — Argo Workflows' SSO RBAC maps OIDC groups to ServiceAccounts by annotation expression; kube-rbac-proxy delegates through SubjectAccessReview. Rejected: no cluster dimension, managed clusters don't recognize Everest identities, per-role ServiceAccounts on every managed cluster, and per-item LIST filtering becomes a SubjectAccessReview per row. Argo Workflows' own docs call complex rules "burdensome" for the installing team.
+
 ## 7. Open Questions
 
-1.  **Policy store decision** (§4.11). The CR store (draft spec 014) is the leading candidate, **not a commitment**. Decision inputs: the compiler prototype (property tests + CSV-equivalence) as the feasibility artifact, and product runway. If CRs are adopted post-GA rather than at GA, the guardrails are: fail-loud CSV/CR coexistence, migrate shipping in the flipping release, one dual-read release, tuple-set verification. The reserved management resource names (§4.2) and subject-kind prefixing (§4.8) are settled in the same decision. Nothing else in this spec depends on the outcome.
+1.  **Policy store decision** (§4.11). The CR store (draft policy-store spec) is the leading candidate, **not a commitment**. Decision inputs: the compiler prototype (property tests + CSV-equivalence) as the feasibility artifact, and product runway. If CRs are adopted post-GA rather than at GA, the guardrails are: fail-loud CSV/CR coexistence, migrate shipping in the flipping release, one dual-read release, tuple-set verification. The reserved management resource names (§4.2) and subject-kind prefixing (§4.8) are settled in the same decision. Nothing else in this spec depends on the outcome.
 2.  **Full audit logging** — deferred (LIST volume); §4.12 is the GA minimum.
-3.  **Performance at scale** — post-filtered LIST is O(items × subjects × policies). Mitigations, in order: first-match short-circuit (§4.6); resolve-once-match-locally (§4.10); compiled-policy caps if the CR store is adopted (draft 014 §4.10). Benchmarks (5,000 tuples × 500 items) gate GA.
+3.  **Performance at scale** — post-filtered LIST is O(items × subjects × policies). Mitigations, in order: first-match short-circuit (§4.6); resolve-once-match-locally (§4.10); compiled-policy caps if the CR store is adopted (draft policy-store spec §4.10). Benchmarks (5,000 tuples × 500 items) gate GA.
 4.  **Per-namespace plugin scoping** — `plugins:use` is a reachability gate (§4.3); requires plugin cooperation; post-GA.
+5.  **External decision service (planned, post-GA)** — an optional external decision point for enterprises with a central OPA, OpenFGA or Cedar deployment. The expected protocol for this outbound call is the OpenID AuthZEN Authorization API 1.0 (Final, January 2026; implemented by OpenFGA); Everest's own review endpoints (§4.10) keep their Kubernetes-style shape, and the hook maps between the two. Composition is pinned now: the external service either **replaces** the built-in decision or is **unioned** with it (it can only add allows). Never a first-opinion-wins chain like Kubernetes' authorizer list — an external deny overriding built-in grants reintroduces deny semantics and voids §4.6's local reasoning.
+6.  **Casbin v2 → v3** — Casbin is now Apache Casbin (Incubating), module path `github.com/casbin/casbin/v3`; we're on `casbin/v2` `v2.135.0`. Decide before GA whether v2 still receives fixes. The upgrade is gated by the §4.1 characterisation test and the §5 decision-equality test, and is the moment to price migrating against an owned evaluator — the §4.10 resolve-once local matcher already is one.
 
 ## 8. References
 
@@ -343,6 +355,15 @@ Full per-decision audit logging stays deferred (§7.2). Four cheap, bounded item
 *   [ArgoCD RBAC](https://argo-cd.readthedocs.io/en/stable/operator-manual/rbac/) — glob-scoped objects (no `/` separator; see §6).
 *   [Rancher RBAC](https://ranchermanager.docs.rancher.com/how-to-guides/new-user-guides/authentication-permissions-and-global-configuration/manage-role-based-access-control-rbac) — global + cluster + project roles.
 *   [Kubernetes RBAC](https://kubernetes.io/docs/reference/access-authn-authz/rbac/) — `Role` vs. `ClusterRole` scope separation.
+
+**Engines and standards (§6, §7):**
+*   [AuthZEN Authorization API 1.0](https://openid.net/wg/authzen/) — OpenID Foundation Final (January 2026); expected protocol for the §7.5 outbound hook.
+*   [cedar-go](https://github.com/cedar-policy/cedar-go) — feature gaps vs. the Rust implementation; [Cedar Access Control for Kubernetes](https://github.com/cedar-policy/cedar-access-control-for-k8s) — Go proof of concept retired in favour of Rust for partial evaluation.
+*   [OpenFGA](https://github.com/openfga/openfga) — storage backends, adopters, AuthZEN support.
+*   [Open Policy Agent](https://www.openpolicyagent.org/) — CNCF graduated; Rego.
+*   [Argo Workflows SSO RBAC](https://argo-workflows.readthedocs.io/en/latest/argo-server-sso/) — OIDC groups mapped to ServiceAccounts.
+*   [Backstage RBAC plugin](https://github.com/backstage/community-plugins/blob/main/workspaces/rbac/plugins/rbac-backend/README.md) — embedded Casbin with a database store; `defaultRole`.
+*   [Apache Casbin](https://github.com/apache/casbin) — ASF incubation, v3 module path, `TypedName`.
 
 **OpenEverest Documentation:**
 *   [OpenEverest v2 API spec](openeverest/api/openapi/http-api.yaml) — `/clusters/{cluster}/...` endpoint definitions.
