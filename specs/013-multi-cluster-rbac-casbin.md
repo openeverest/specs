@@ -3,8 +3,8 @@
 *   **Status:** Draft
 *   **Authors:** @recharte
 *   **Created:** 2026-05-07
-*   **Last Updated:** 2026-09-16
-*   **Related Issues:** [openeverest#3009](https://github.com/openeverest/openeverest/issues/3009), [openeverest#3104](https://github.com/openeverest/openeverest/pull/3104)
+*   **Last Updated:** 2026-11-25
+*   **Related Issues:** [openeverest#3009](https://github.com/openeverest/openeverest/issues/3009), [openeverest#3104](https://github.com/openeverest/openeverest/pull/3104), [openeverest#3718](https://github.com/openeverest/openeverest/issues/3718)
 
 ---
 
@@ -133,11 +133,11 @@ Endpoints outside the resource model:
 *   **`/events` (SSE).** Every event is filtered under `read` before delivery — a subscription is not a bypass. The envelope gains a `cluster` field; each `events.Type` maps to exactly one `(resource, object)` pair or an explicit non-resource gate, in a table in `pkg/events` with a CI completeness check; backup/restore events carry the owning instance; `settings.updated` and `plugin.*` require the resource's `read`; `user.*` events (incl. `user.login_failed`, today broadcast to everyone) require `clusters:read` on `*`. An unmapped `Type` is **not delivered**.
 *   **Backups and restores are keyed by their owning instance** (`cluster/ns/instance`): backup names are typically generated (`generateName`), one grant covers an instance's history, and it matches v1 and the nested routes.
 *   **The cluster gate is explicit.** `clusters:read` gates only cluster visibility. Nested checks are self-sufficient — `instances:read` on `prod/dev/*` works without `clusters:read` on `prod` — but UI navigation effectively requires it, so roles should include it (`validate` warns when it's missing, §4.6).
-*   **Derived checks run on writes only.** Writing a resource that references others requires read on the referenced resources. The general rule: **every `*Ref` in `InstanceSpec` requires `read` on the referenced resource**; current enumeration:
+*   **Derived checks run on writes only.** Writing a resource that references others requires read on the referenced resources. The general rule: **every field in `InstanceSpec` that names another resource requires `read` on it**, whether a `*Ref` or a plain name such as `components.*.storage.storageClass`. **An unset field names nothing and needs no check**, even when a default fills it later: a component without a storage class gets the cluster's default from Kubernetes when each volume is created, so nothing in the request names a class to authorize. Current enumeration:
 
     | Operation | Additional checks |
     |---|---|
-    | Create instance | `providers:read` on the provider; `backup-storages:read` on each storage; `secrets:read` on `userSecretRef`; `backups:create` (obj = instance) when schedules are declared; `restores:create` + `backups:read` (obj = source instance) when `dataSource` is set |
+    | Create instance | `providers:read` on the provider; `storage-classes:read` on each component's storage class, when set; `backup-storages:read` on each storage; `secrets:read` on `userSecretRef`; `backups:create` (obj = instance) when schedules are declared; `restores:create` + `backups:read` (obj = source instance) when `dataSource` is set |
     | Update instance | Same checks, **delta-only** — only references added or changed by the request (else losing one grant permanently locks the instance). The update path has no derived checks today and must gain them. **PATCH**: compute the post-merge object (dry-run or in-process merge) before checking; if infeasible, reject PATCH for objects with cross-references |
     | Create from preset | `instance-presets:read`, then `instances:create` or `create-from-preset` (§4.3). The waiver covers **only references pinned by the resolved preset** (the preset author's authority — the Service Catalog launch-role pattern); requester-supplied references (e.g. `userSecretRef`) are never waived |
     | Create backup | `backups:create` (obj = instance) + `backup-storages:read` on the target storage + `backup-classes:read` on the referenced class (a class selects an execution identity — §4.8) |
