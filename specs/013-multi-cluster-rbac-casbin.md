@@ -3,7 +3,7 @@
 *   **Status:** Draft
 *   **Authors:** @recharte
 *   **Created:** 2026-05-07
-*   **Last Updated:** 2026-11-24
+*   **Last Updated:** 2026-11-26
 *   **Related Issues:** [openeverest#3009](https://github.com/openeverest/openeverest/issues/3009), [openeverest#3104](https://github.com/openeverest/openeverest/pull/3104)
 
 ---
@@ -268,7 +268,22 @@ Three contracts, all specified in OpenAPI now (even where implementation lands p
 *   **`POST /self-access-reviews`** — any authenticated user; a batch of `(resource, action, object)` triples (`maxItems: 256`, 400 over-cap) returning per-triple decisions: one call per rendered page decides every button, no client-side matcher. Scope views can't express per-item grants; embedding `allowedActions` in list items breaks the no-DTO rule. Implementation: resolve the caller's permission set **once**, match locally (`BatchEnforce` is a bare loop — not a mitigation, §7.3); the local matcher is the same `GlobMatch`, differential-tested against the engine through the `Authorizer` interface (§4.11).
 *   **`POST /access-reviews`** — admin-gated, same bound; evaluates *any* subject, returns `{allowed, matchedBy[]}` — the "why is this denied" answer. The self/any split mirrors `SelfSubjectAccessReview`/`SubjectAccessReview`: reviewing others is itself a permission.
 
-No “RBAC disabled → show everything” UI branch: the enforcer is always on (§4.6). Migration off the UI's in-browser `casbin.js` matching (~40 files) is phased **in work, not contract**: `/self-access-reviews` first, page-by-page; `/permissions` changes shape once (own client, no GA install to strand); “no `casbin.js` import in `ui/`” is the exit criterion.
+**Review objects may carry `*`.** A review triple's object has the resource's arity (§4.2), and each segment is a DNS-1123 name or `*`. A `*` segment asks about **every** name in that position: `(instances, create, prod/dev/*)` asks whether the caller may create an instance of any name in `prod/dev`, the question a Create button needs before the object has a name. The answer is `allowed` only when one grant covers the whole scope; a grant on `prod/dev/my-db` does not. A denied scope answer therefore says nothing about single objects, which narrower grants may still allow. This is the meaning of an empty `name` in `SelfSubjectAccessReview`, and it is what the matcher already answers, because the pattern `*` matches the literal `*`; the UI relies on it today. It becomes defined behaviour: request validation for the review endpoints MUST accept `*` where §4.1 otherwise requires a name.
+
+**The cap bounds a request, not a page.** A client with more triples than the cap sends several requests.
+
+**Decisions are advisory and short-lived.** The server enforces every request regardless (§4.8), so a stale decision can only show a control that then answers 403, or hide one for a while. A client may reuse a decision for at most 30 seconds, and MUST drop every cached decision when any API request answers 403 and when the signed-in subject changes. A server-sent policy-change signal is not required. Today's 5-second re-fetch of `/permissions` goes away with the raw-tuple shape.
+
+**`/permissions` is not a decision input.** It shows a user what they hold and detects the zero-grant state. Clients decide what to render only through `/self-access-reviews`: a list of grants is complete only while every grant is a pattern the server can enumerate, and a review stays truthful if decisions ever come from something that cannot list its grants, such as another engine or an external decision point.
+
+**How the UI asks.** These rules bind the Everest UI and plugin frontends; the implementation is documented with the UI code.
+
+*   **One path.** Every check goes through a single function that collects the triples asked at the same moment into one review request. No component matches grants itself, and plugin frontends ask through the host (plugin SDK) instead of reading `/permissions`.
+*   **Scope first.** The UI asks the `*` question for the scope a view shows, and asks per object only where that answer is denied. Role grants are typically namespace-wide, so one answer usually covers every row of a table.
+*   **Only what is rendered.** A check names the actions the view offers, not all of them. A `read` check is not needed to decide whether to call a list endpoint: lists arrive already filtered (§4.5).
+*   **No flicker.** A control whose decision is unknown is neither shown nor dropped: its space is reserved with a skeleton until the answer arrives, and the layout does not move either way. The scope questions a route needs are known from the route and are asked before it renders; a row menu resolves its items by the time it opens.
+
+No “RBAC disabled → show everything” UI branch: the enforcer is always on (§4.6). Migration off the UI's in-browser `casbin.js` matching is phased **in work, not contract**: `/self-access-reviews` first, switched at the one function every UI check already goes through rather than page by page (the permission hooks are already asynchronous, so their ~50 consumer files do not change); `/permissions` changes shape once (own client, no GA install to strand); “no `casbin.js` import in `ui/`” is the exit criterion.
 
 ### 4.11 Policy Store
 
@@ -314,6 +329,7 @@ Full per-decision audit logging stays deferred (§7.2). Four cheap, bounded item
 **Tests & docs:**
 *   Unit tests per RBAC handler; e2e authorization matrix (resources × actions × allow/deny); install-then-login e2e for the bootstrap admin.
 *   The three §4.10 contracts in OpenAPI; no client-side matching — “no `casbin.js` import in `ui/`” is the exit criterion.
+*   Review requests accept `*` segments with the scope meaning of §4.10, tested against scope-wide and per-object grants. UI checks go through one batching path, scope first, with no layout shift while decisions load.
 *   Docs: v2 vocabulary, §4.4 table + semantic deltas, Day-1 bundle (§4.9), group-binding onboarding with the `role:viewer` multi-tenant caveat, `backup-classes` and `plugins:use` warnings (§4.8).
 *   Helm ships `defaultRole: ""` + bootstrap-admin binding + NOTES (§4.6).
 *   GA docs present the decided policy store (§7.1) as the policy interface; `policy.csv` is pre-GA only.
